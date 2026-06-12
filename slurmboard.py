@@ -304,10 +304,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   tr:last-child > td { border-bottom: none; }
   tr:hover > td { background: rgba(255,255,255,.03); }
 
-  /* partition row expand */
-  .part-row { cursor: pointer; }
-  .part-row:hover > td { background: rgba(79,140,255,.06) !important; }
-  .toggle-cell { width: 28px; text-align: center; color: var(--muted); font-size: 11px; }
+  /* partition row */
+  .toggle-cell { width: 28px; text-align: center; color: var(--muted); font-size: 11px; cursor: pointer; }
+  .toggle-cell:hover { color: var(--text); }
+  .part-name-link { cursor: pointer; border-bottom: 1px dotted var(--text); }
+  .part-name-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
   /* inner node sub-table */
   .nodes-expand-row > td { padding: 0 0 0 36px; background: var(--bg) !important; }
@@ -626,8 +627,8 @@ function renderPartitions() {
     const tr = document.createElement('tr');
     tr.className = 'part-row';
     tr.innerHTML = `
-      <td class="toggle-cell">${cur === 'nodes' ? '▼' : '▶'}</td>
-      <td><b>${p.name}</b></td>
+      <td class="toggle-cell">${cur ? '▼' : '▶'}</td>
+      <td><b class="part-name-link">${p.name}</b></td>
       <td>${p.avail}</td>
       <td>${p.timelimit}</td>
       <td>${p.nodes}</td>
@@ -636,16 +637,21 @@ function renderPartitions() {
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
 
-    // row click: close if anything is open; open nodes if nothing is open
-    tr.addEventListener('click', () => {
+    // triangle: close if anything open, open nodes if closed
+    tr.querySelector('.toggle-cell').addEventListener('click', () => {
       if (cur) delete expandState[p.name];
       else expandState[p.name] = 'nodes';
       renderPartitions();
     });
-    // run/pend spans → mutually exclusive toggle
+    // partition name: mutual-exclusion toggle for nodes
+    tr.querySelector('.part-name-link').addEventListener('click', () => {
+      if (cur === 'nodes') delete expandState[p.name];
+      else expandState[p.name] = 'nodes';
+      renderPartitions();
+    });
+    // run/pend spans: mutual-exclusion toggle
     tr.querySelectorAll('.job-toggle').forEach(span => {
-      span.addEventListener('click', e => {
-        e.stopPropagation();
+      span.addEventListener('click', () => {
         const kind = span.dataset.kind;
         if (cur === kind) delete expandState[p.name];
         else expandState[p.name] = kind;
