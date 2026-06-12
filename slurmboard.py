@@ -415,9 +415,9 @@ function minibar(pct, cls='') {
 // ── multi-column sort ───────────────────────────────────────────────────────
 // Array of {key, dir} objects; first entry = primary sort.
 const partSortList = [{key: 'name', dir: 1}];
-const expandedParts   = new Set();
-const expandedRunning = new Set();
-const expandedPending = new Set();
+// expandState[partName] = "nodes"|"running"|"pending"; absent = closed.
+// Only one panel open per partition at a time.
+const expandState = {};
 
 function multiSort(rows, list) {
   if (!list.length) return rows;
@@ -606,87 +606,66 @@ function renderPartitions() {
   tbody.innerHTML = '';
 
   for (const p of visible) {
-    const isOpen  = expandedParts.has(p.name);
-    const cpuP    = pct(p.cpu_alloc, p.cpu_total);
-    const idleP   = pct(p.gpu_idle,  p.gpu_total);
+    const cur    = expandState[p.name];   // "nodes"|"running"|"pending"|undefined
+    const cpuP   = pct(p.cpu_alloc, p.cpu_total);
+    const idleP  = pct(p.gpu_idle,  p.gpu_total);
     const gpuCell = p.gpu_total
       ? minibar(idleP, 'gpu') + `${p.gpu_idle} / ${p.gpu_total}`
       : '<span class="muted">—</span>';
     const vramCell = p.gpu_vram_gb != null
       ? `<b>${p.gpu_vram_gb}</b> GB`
       : '<span class="muted">—</span>';
-    const runOpen  = expandedRunning.has(p.name);
-    const pendOpen = expandedPending.has(p.name);
 
-    const runSpan  = `<span class="job-toggle" data-part="${p.name}" data-kind="running"
+    const runSpan  = `<span class="job-toggle" data-kind="running"
       style="color:var(--good);cursor:pointer;border-bottom:1px dotted var(--good)"
-      title="Click to ${runOpen ? 'hide' : 'show'} running jobs">${p.jobs_running} run</span>`;
-    const pendSpan = `<span class="job-toggle" data-part="${p.name}" data-kind="pending"
+      >${p.jobs_running} run</span>`;
+    const pendSpan = `<span class="job-toggle" data-kind="pending"
       style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)"
-      title="Click to ${pendOpen ? 'hide' : 'show'} pending jobs">${p.jobs_pending} pend</span>`;
-    const jobsCell = `${runSpan}<span class="muted"> · </span>${pendSpan}`;
+      >${p.jobs_pending} pend</span>`;
 
     const tr = document.createElement('tr');
     tr.className = 'part-row';
     tr.innerHTML = `
-      <td class="toggle-cell">${isOpen ? '▼' : '▶'}</td>
+      <td class="toggle-cell">${cur === 'nodes' ? '▼' : '▶'}</td>
       <td><b>${p.name}</b></td>
       <td>${p.avail}</td>
       <td>${p.timelimit}</td>
       <td>${p.nodes}</td>
-      <td>${jobsCell}</td>
+      <td>${runSpan}<span class="muted"> · </span>${pendSpan}</td>
       <td>${minibar(cpuP)}${p.cpu_alloc} / ${p.cpu_total}</td>
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
 
-    // partition row click → toggle nodes
+    // row click → toggle nodes (mutually exclusive with run/pend)
     tr.addEventListener('click', () => {
-      if (expandedParts.has(p.name)) expandedParts.delete(p.name);
-      else expandedParts.add(p.name);
+      expandState[p.name] = cur === 'nodes' ? undefined : 'nodes';
+      if (expandState[p.name] === undefined) delete expandState[p.name];
       renderPartitions();
     });
-    // run/pend spans → toggle job lists (stop propagation to avoid row toggle)
+    // run/pend spans → mutually exclusive toggle
     tr.querySelectorAll('.job-toggle').forEach(span => {
       span.addEventListener('click', e => {
         e.stopPropagation();
         const kind = span.dataset.kind;
-        const set  = kind === 'running' ? expandedRunning : expandedPending;
-        if (set.has(p.name)) set.delete(p.name);
-        else set.add(p.name);
+        if (cur === kind) delete expandState[p.name];
+        else expandState[p.name] = kind;
         renderPartitions();
       });
     });
     tbody.appendChild(tr);
 
-    // running jobs inline
-    if (runOpen) {
-      const runJobs = (p.jobs || []).filter(j => j.state === 'RUNNING');
+    // inline expansion panel (only one at a time)
+    if (cur) {
       const expandTr = document.createElement('tr');
       expandTr.className = 'nodes-expand-row';
       const td = document.createElement('td');
       td.colSpan = 9;
-      td.innerHTML = buildJobSubTable(runJobs, false);
-      expandTr.appendChild(td);
-      tbody.appendChild(expandTr);
-    }
-    // pending jobs inline
-    if (pendOpen) {
-      const pendJobs = (p.jobs || []).filter(j => j.state === 'PENDING');
-      const expandTr = document.createElement('tr');
-      expandTr.className = 'nodes-expand-row';
-      const td = document.createElement('td');
-      td.colSpan = 9;
-      td.innerHTML = buildJobSubTable(pendJobs, true);
-      expandTr.appendChild(td);
-      tbody.appendChild(expandTr);
-    }
-    // nodes inline
-    if (isOpen) {
-      const expandTr = document.createElement('tr');
-      expandTr.className = 'nodes-expand-row';
-      const td = document.createElement('td');
-      td.colSpan = 9;
-      td.innerHTML = buildNodeSubTable(p.name);
+      if (cur === 'nodes') {
+        td.innerHTML = buildNodeSubTable(p.name);
+      } else {
+        const jobs = (p.jobs || []).filter(j => j.state === cur.toUpperCase());
+        td.innerHTML = buildJobSubTable(jobs, cur === 'pending');
+      }
       expandTr.appendChild(td);
       tbody.appendChild(expandTr);
     }
