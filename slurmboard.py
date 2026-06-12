@@ -144,22 +144,35 @@ def collect_partitions():
 
 
 def collect_job_counts():
-    """Return {partition: {running: N, pending: N}} from squeue."""
-    text = _run(["squeue", "-h", "-o", "%P|%T"])
+    """Return {partition: {running, pending, jobs: [...]}} from squeue."""
+    # %P partition  %i jobid  %u user  %j name  %T state
+    # %M elapsed/queue time  %C cpus  %b gres  %R reason/nodelist
+    text = _run(["squeue", "-h", "-o", "%P|%i|%u|%j|%T|%M|%C|%b|%R"])
     counts = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        parts = line.split("|")
-        if len(parts) < 2:
+        parts = line.split("|", 8)  # maxsplit keeps %R intact if it contains |
+        if len(parts) < 9:
             continue
-        part, state = parts[0], parts[1].upper()
-        c = counts.setdefault(part, {"running": 0, "pending": 0})
-        if state == "RUNNING":
+        part, jid, user, name, state, time_used, cpus, gres, reason = parts
+        state_up = state.upper()
+        c = counts.setdefault(part, {"running": 0, "pending": 0, "jobs": []})
+        if state_up == "RUNNING":
             c["running"] += 1
-        elif state == "PENDING":
+        elif state_up == "PENDING":
             c["pending"] += 1
+        c["jobs"].append({
+            "id":     jid,
+            "user":   user,
+            "name":   name,
+            "state":  state_up,
+            "time":   time_used,
+            "cpus":   cpus,
+            "gres":   gres if gres not in ("", "N/A") else None,
+            "reason": reason,
+        })
     return counts
 
 
@@ -212,12 +225,13 @@ def build_snapshot():
     partitions = []
     for name, agg in sorted(part_agg.items()):
         meta = part_meta.get(name, {})
-        jc   = job_counts.get(name, {"running": 0, "pending": 0})
+        jc   = job_counts.get(name, {"running": 0, "pending": 0, "jobs": []})
         agg["avail"]        = meta.get("avail",    "?")
         agg["timelimit"]    = meta.get("timelimit", "?")
         agg["gpu_idle"]     = agg["gpu_total"] - agg["gpu_alloc"]
         agg["jobs_running"] = jc["running"]
         agg["jobs_pending"] = jc["pending"]
+        agg["jobs"]         = jc["jobs"]
         vram_vals = agg.pop("_vram_vals")
         agg["gpu_vram_gb"] = max(vram_vals) if vram_vals else None
         partitions.append(agg)
@@ -401,7 +415,9 @@ function minibar(pct, cls='') {
 // ── multi-column sort ───────────────────────────────────────────────────────
 // Array of {key, dir} objects; first entry = primary sort.
 const partSortList = [{key: 'name', dir: 1}];
-const expandedParts = new Set();
+const expandedParts   = new Set();
+const expandedRunning = new Set();
+const expandedPending = new Set();
 
 function multiSort(rows, list) {
   if (!list.length) return rows;
@@ -541,6 +557,34 @@ function buildNodeSubTable(partName) {
   </table></div>`;
 }
 
+// ── job sub-table (inside expanded running/pending section) ────────────────
+function buildJobSubTable(jobs, isPending) {
+  if (!jobs.length) {
+    return '<div style="padding:8px 0;color:var(--muted);font-size:13px">No jobs.</div>';
+  }
+  const timeHeader   = isPending ? 'Queued' : 'Running';
+  const reasonHeader = isPending ? 'Reason' : 'Nodes';
+  const rows = jobs.map(j => {
+    const gresCell = j.gres ? `<span class="muted">${j.gres}</span>` : '<span class="muted">—</span>';
+    return `<tr>
+      <td>${j.id}</td>
+      <td>${j.user}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${j.name}">${j.name}</td>
+      <td>${j.cpus}</td>
+      <td>${gresCell}</td>
+      <td>${j.time}</td>
+      <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${j.reason}">${j.reason}</td>
+    </tr>`;
+  }).join('');
+  return `<div class="inner-wrap"><table class="inner-table">
+    <thead><tr>
+      <th>Job ID</th><th>User</th><th>Name</th><th>CPUs</th><th>GPUs</th>
+      <th>${timeHeader}</th><th>${reasonHeader}</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
 // ── render partition table ──────────────────────────────────────────────────
 function renderPartitions() {
   const vramMin  = parseInt(document.getElementById('vram-min').value) || 0;
@@ -571,10 +615,16 @@ function renderPartitions() {
     const vramCell = p.gpu_vram_gb != null
       ? `<b>${p.gpu_vram_gb}</b> GB`
       : '<span class="muted">—</span>';
-    const jobsCell = `<span style="color:var(--good)">${p.jobs_running}</span>`
-      + `<span class="muted"> run</span> · `
-      + `<span style="color:var(--warn)">${p.jobs_pending}</span>`
-      + `<span class="muted"> pend</span>`;
+    const runOpen  = expandedRunning.has(p.name);
+    const pendOpen = expandedPending.has(p.name);
+
+    const runSpan  = `<span class="job-toggle" data-part="${p.name}" data-kind="running"
+      style="color:var(--good);cursor:pointer;border-bottom:1px dotted var(--good)"
+      title="Click to ${runOpen ? 'hide' : 'show'} running jobs">${p.jobs_running} run</span>`;
+    const pendSpan = `<span class="job-toggle" data-part="${p.name}" data-kind="pending"
+      style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)"
+      title="Click to ${pendOpen ? 'hide' : 'show'} pending jobs">${p.jobs_pending} pend</span>`;
+    const jobsCell = `${runSpan}<span class="muted"> · </span>${pendSpan}`;
 
     const tr = document.createElement('tr');
     tr.className = 'part-row';
@@ -588,13 +638,49 @@ function renderPartitions() {
       <td>${minibar(cpuP)}${p.cpu_alloc} / ${p.cpu_total}</td>
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
+
+    // partition row click → toggle nodes
     tr.addEventListener('click', () => {
       if (expandedParts.has(p.name)) expandedParts.delete(p.name);
       else expandedParts.add(p.name);
       renderPartitions();
     });
+    // run/pend spans → toggle job lists (stop propagation to avoid row toggle)
+    tr.querySelectorAll('.job-toggle').forEach(span => {
+      span.addEventListener('click', e => {
+        e.stopPropagation();
+        const kind = span.dataset.kind;
+        const set  = kind === 'running' ? expandedRunning : expandedPending;
+        if (set.has(p.name)) set.delete(p.name);
+        else set.add(p.name);
+        renderPartitions();
+      });
+    });
     tbody.appendChild(tr);
 
+    // running jobs inline
+    if (runOpen) {
+      const runJobs = (p.jobs || []).filter(j => j.state === 'RUNNING');
+      const expandTr = document.createElement('tr');
+      expandTr.className = 'nodes-expand-row';
+      const td = document.createElement('td');
+      td.colSpan = 9;
+      td.innerHTML = buildJobSubTable(runJobs, false);
+      expandTr.appendChild(td);
+      tbody.appendChild(expandTr);
+    }
+    // pending jobs inline
+    if (pendOpen) {
+      const pendJobs = (p.jobs || []).filter(j => j.state === 'PENDING');
+      const expandTr = document.createElement('tr');
+      expandTr.className = 'nodes-expand-row';
+      const td = document.createElement('td');
+      td.colSpan = 9;
+      td.innerHTML = buildJobSubTable(pendJobs, true);
+      expandTr.appendChild(td);
+      tbody.appendChild(expandTr);
+    }
+    // nodes inline
     if (isOpen) {
       const expandTr = document.createElement('tr');
       expandTr.className = 'nodes-expand-row';
