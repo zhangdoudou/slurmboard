@@ -374,7 +374,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </div>
   <table id="part-table">
     <thead><tr>
-      <th class="no-sort" style="width:28px"></th>
+      <th class="no-sort toggle-cell" id="part-th-toggle">▶</th>
       <th data-k="name"          data-label="Partition">Partition</th>
       <th data-k="avail"         data-label="Avail">Avail</th>
       <th data-k="timelimit"     data-label="Time limit">Time limit</th>
@@ -450,6 +450,21 @@ function updatePartHeaders() {
 }
 
 function wirePartHeaders() {
+  // header toggle: expand all nodes / collapse all
+  document.getElementById('part-th-toggle').addEventListener('click', () => {
+    const vramMin  = parseInt(document.getElementById('vram-min').value) || 0;
+    const idleOnly = document.getElementById('idle-only').checked;
+    const visible  = SNAPSHOT.partitions.filter(p => {
+      if (idleOnly && p.gpu_idle <= 0) return false;
+      if (vramMin > 0 && (p.gpu_vram_gb == null || p.gpu_vram_gb < vramMin)) return false;
+      return true;
+    });
+    const anyOpen = visible.some(p => expandState[p.name]);
+    if (anyOpen) visible.forEach(p => delete expandState[p.name]);
+    else         visible.forEach(p => { expandState[p.name] = 'nodes'; });
+    renderPartitions();
+  });
+
   document.querySelectorAll('#part-table th[data-k]').forEach(th => {
     th.addEventListener('click', e => {
       const key = th.dataset.k;
@@ -602,6 +617,9 @@ function renderPartitions() {
     visible.length === sorted.length
       ? `${sorted.length} partitions`
       : `${visible.length} / ${sorted.length} partitions`;
+
+  const anyOpen = visible.some(p => expandState[p.name]);
+  document.getElementById('part-th-toggle').textContent = anyOpen ? '▼' : '▶';
 
   const tbody = document.getElementById('part-tbody');
   tbody.innerHTML = '';
