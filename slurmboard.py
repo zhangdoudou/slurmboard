@@ -636,10 +636,10 @@ function renderPartitions() {
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
 
-    // row click → toggle nodes (mutually exclusive with run/pend)
+    // row click: close if anything is open; open nodes if nothing is open
     tr.addEventListener('click', () => {
-      expandState[p.name] = cur === 'nodes' ? undefined : 'nodes';
-      if (expandState[p.name] === undefined) delete expandState[p.name];
+      if (cur) delete expandState[p.name];
+      else expandState[p.name] = 'nodes';
       renderPartitions();
     });
     // run/pend spans → mutually exclusive toggle
