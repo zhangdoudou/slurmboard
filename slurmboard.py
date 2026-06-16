@@ -381,10 +381,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </div>
   <table id="part-table">
     <thead><tr>
-      <th class="no-sort" style="width:52px;text-align:center;padding:8px 4px">
-        <span id="part-th-toggle" class="toggle-cell" style="width:auto;display:inline" title="Expand/collapse all">▶</span><span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">↻</span>
-      </th>
-      <th data-k="name"          data-label="Partition">Partition</th>
+      <th class="no-sort toggle-cell" id="part-th-toggle">▶</th>
+      <th data-k="name"          data-label="Partition"><span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span> Partition</th>
       <th data-k="avail"         data-label="Avail">Avail</th>
       <th data-k="timelimit"     data-label="Time limit">Time limit</th>
       <th data-k="nodes"         data-label="Nodes">Nodes</th>
@@ -409,9 +407,7 @@ async function refreshData(partName) {
   const key = partName || '*';
   if (refreshingParts.has(key)) return;
   refreshingParts.add(key);
-  const hdrBtn = document.getElementById('part-th-refresh');
-  if (hdrBtn) hdrBtn.classList.add('loading');
-  renderPartitions();
+  renderPartitions(); // shows loading state via updatePartHeaders
 
   try {
     const resp = await fetch('/data');
@@ -446,7 +442,6 @@ async function refreshData(partName) {
   }
 
   refreshingParts.delete(key);
-  if (hdrBtn) hdrBtn.classList.remove('loading');
   renderPartitions();
 }
 
@@ -499,19 +494,23 @@ function updatePartHeaders() {
     const key   = th.dataset.k;
     const label = th.dataset.label;
     const idx   = partSortList.findIndex(s => s.key === key);
-    if (idx < 0) { th.textContent = label; return; }
-    const arrow = partSortList[idx].dir > 0 ? ' ↑' : ' ↓';
-    const badge = partSortList.length > 1 ? ' ' + (badges[idx] || String(idx + 1)) : '';
-    th.textContent = label + arrow + badge;
+    // Preserve refresh button if present in this th
+    const prevRefresh = th.querySelector('.th-refresh');
+    const refreshHtml = prevRefresh ? prevRefresh.outerHTML + ' ' : '';
+    const arrow = idx >= 0 ? (partSortList[idx].dir > 0 ? ' ↑' : ' ↓') : '';
+    const badge = (idx >= 0 && partSortList.length > 1)
+      ? ' ' + (badges[idx] || String(idx + 1)) : '';
+    th.innerHTML = refreshHtml + label + arrow + badge;
   });
+  // Re-wire after innerHTML replacement destroyed old listeners
+  const thRefresh = document.getElementById('part-th-refresh');
+  if (thRefresh) {
+    if (refreshingParts.has('*')) thRefresh.classList.add('loading');
+    thRefresh.onclick = (e) => { e.stopPropagation(); refreshData(); };
+  }
 }
 
 function wirePartHeaders() {
-  // header refresh: fetch fresh data for all partitions
-  document.getElementById('part-th-refresh').addEventListener('click', () => {
-    refreshData();
-  });
-
   // header toggle: expand all nodes / collapse all
   document.getElementById('part-th-toggle').addEventListener('click', () => {
     const vramMin  = parseInt(document.getElementById('vram-min').value) || 0;
