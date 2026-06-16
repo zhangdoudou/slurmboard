@@ -310,10 +310,10 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .part-name-link { cursor: pointer; border-bottom: 1px dotted var(--text); }
   .part-name-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
   .th-refresh, .row-refresh {
-    color: var(--muted); font-size: 11px; cursor: pointer;
+    color: var(--muted); font-size: inherit; cursor: pointer;
   }
-  .th-refresh { margin-left: 5px; }
-  .row-refresh { margin-right: 4px; }
+  .th-refresh { margin-right: 6px; }
+  .row-refresh { margin-right: 10px; }
   .th-refresh:hover, .row-refresh:hover { color: var(--accent); }
   .th-refresh.loading, .row-refresh.loading { color: var(--accent); opacity: 0.5; pointer-events: none; }
 
