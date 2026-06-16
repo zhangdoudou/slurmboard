@@ -309,6 +309,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .toggle-cell:hover { color: var(--text); }
   .part-name-link { cursor: pointer; border-bottom: 1px dotted var(--text); }
   .part-name-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+  .th-refresh, .row-refresh {
+    color: var(--muted); font-size: 11px; cursor: pointer;
+  }
+  .th-refresh { margin-left: 5px; }
+  .row-refresh { margin-right: 4px; }
+  .th-refresh:hover, .row-refresh:hover { color: var(--accent); }
+  .th-refresh.loading, .row-refresh.loading { color: var(--accent); opacity: 0.5; pointer-events: none; }
 
   /* inner node sub-table */
   .nodes-expand-row > td { padding: 0 0 0 36px; background: var(--bg) !important; }
@@ -342,7 +349,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <body>
 <header>
   <h1>&#9881; Slurm Dashboard</h1>
-  <div class="meta">snapshot taken at __GENERATED_AT__ &middot; reload the page to refresh</div>
+  <div class="meta" id="snap-meta">snapshot taken at __GENERATED_AT__ &middot; reload the page to refresh</div>
   <button class="reload" onclick="location.reload()">&#x21bb; Refresh</button>
 </header>
 <main>
@@ -374,7 +381,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </div>
   <table id="part-table">
     <thead><tr>
-      <th class="no-sort toggle-cell" id="part-th-toggle">▶</th>
+      <th class="no-sort" style="width:52px;text-align:center;padding:8px 4px">
+        <span id="part-th-toggle" class="toggle-cell" style="width:auto;display:inline" title="Expand/collapse all">▶</span><span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">↻</span>
+      </th>
       <th data-k="name"          data-label="Partition">Partition</th>
       <th data-k="avail"         data-label="Avail">Avail</th>
       <th data-k="timelimit"     data-label="Time limit">Time limit</th>
@@ -391,7 +400,55 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </main>
 
 <script>
-const SNAPSHOT = __SNAPSHOT_JSON__;
+let SNAPSHOT = __SNAPSHOT_JSON__;
+
+// ── refresh (partial or full, without losing expand/sort state) ─────────────
+const refreshingParts = new Set();
+
+async function refreshData(partName) {
+  const key = partName || '*';
+  if (refreshingParts.has(key)) return;
+  refreshingParts.add(key);
+  const hdrBtn = document.getElementById('part-th-refresh');
+  if (hdrBtn) hdrBtn.classList.add('loading');
+  renderPartitions();
+
+  try {
+    const resp = await fetch('/data');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const newSnap = await resp.json();
+    if (newSnap.error) throw new Error(newSnap.error);
+
+    if (partName) {
+      // Patch only this partition's entry and its nodes
+      const newPart = newSnap.partitions.find(p => p.name === partName);
+      if (newPart) {
+        const idx = SNAPSHOT.partitions.findIndex(p => p.name === partName);
+        if (idx >= 0) SNAPSHOT.partitions[idx] = newPart;
+        else SNAPSHOT.partitions.push(newPart);
+      }
+      newSnap.nodes.forEach(n => {
+        if (!n.partitions.includes(partName)) return;
+        const i = SNAPSHOT.nodes.findIndex(sn => sn.name === n.name);
+        if (i >= 0) SNAPSHOT.nodes[i] = n; else SNAPSHOT.nodes.push(n);
+      });
+    } else {
+      // Full snapshot replace — keep expand/sort state (those live outside SNAPSHOT)
+      SNAPSHOT = newSnap;
+      const meta = document.getElementById('snap-meta');
+      if (meta) meta.textContent =
+        `snapshot taken at ${newSnap.generated_at} · reload the page to refresh`;
+      renderSummary(SNAPSHOT.summary);
+      renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+    }
+  } catch(e) {
+    console.error('slurmboard refresh failed:', e);
+  }
+
+  refreshingParts.delete(key);
+  if (hdrBtn) hdrBtn.classList.remove('loading');
+  renderPartitions();
+}
 
 // ── helpers ────────────────────────────────────────────────────────────────
 function pct(a, t) { return t > 0 ? Math.round(a / t * 100) : 0; }
@@ -450,6 +507,11 @@ function updatePartHeaders() {
 }
 
 function wirePartHeaders() {
+  // header refresh: fetch fresh data for all partitions
+  document.getElementById('part-th-refresh').addEventListener('click', () => {
+    refreshData();
+  });
+
   // header toggle: expand all nodes / collapse all
   document.getElementById('part-th-toggle').addEventListener('click', () => {
     const vramMin  = parseInt(document.getElementById('vram-min').value) || 0;
@@ -642,11 +704,16 @@ function renderPartitions() {
       style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)"
       >${p.jobs_pending} pend</span>`;
 
+    const isRefreshing = refreshingParts.has(p.name) || refreshingParts.has('*');
+    const rowRefreshHtml = isRefreshing
+      ? '<span class="row-refresh loading" title="Refreshing…">&#x21bb;</span>'
+      : `<span class="row-refresh" data-part="${p.name}" title="Refresh partition">&#x21bb;</span>`;
+
     const tr = document.createElement('tr');
     tr.className = 'part-row';
     tr.innerHTML = `
       <td class="toggle-cell">${cur ? '▼' : '▶'}</td>
-      <td><b class="part-name-link">${p.name}</b></td>
+      <td>${rowRefreshHtml}<b class="part-name-link">${p.name}</b></td>
       <td>${p.avail}</td>
       <td>${p.timelimit}</td>
       <td>${p.nodes}</td>
@@ -654,6 +721,15 @@ function renderPartitions() {
       <td>${minibar(cpuP)}${p.cpu_alloc} / ${p.cpu_total}</td>
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
+
+    // row refresh button
+    const rowRefreshBtn = tr.querySelector('.row-refresh[data-part]');
+    if (rowRefreshBtn) {
+      rowRefreshBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        refreshData(p.name);
+      });
+    }
 
     // triangle: close if anything open, open nodes if closed
     tr.querySelector('.toggle-cell').addEventListener('click', () => {
@@ -748,6 +824,17 @@ class Handler(BaseHTTPRequestHandler):
             body = render_page()
             self.send_response(200)
             self.send_header("Content-Type",   "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control",  "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/data":
+            try:
+                body = json.dumps(build_snapshot()).encode("utf-8")
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type",   "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control",  "no-store")
             self.end_headers()
