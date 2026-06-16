@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import html as _html
 import json
 import re
 import subprocess
@@ -242,6 +243,211 @@ def build_snapshot():
         "partitions": partitions,
         "nodes":      nodes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Job detail
+# ---------------------------------------------------------------------------
+
+_JOB_RE = {
+    "job_name":    re.compile(r"JobName=(\S+)"),
+    "user":        re.compile(r"UserId=([^(\s]+)"),
+    "account":     re.compile(r"\bAccount=(\S+)"),
+    "qos":         re.compile(r"\bQOS=(\S+)"),
+    "state":       re.compile(r"JobState=(\S+)"),
+    "reason":      re.compile(r"\bReason=(\S+)"),
+    "partition":   re.compile(r"\bPartition=(\S+)"),
+    "priority":    re.compile(r"Priority=(\d+)"),
+    "num_nodes":   re.compile(r"NumNodes=(\d+)"),
+    "num_cpus":    re.compile(r"NumCPUs=(\d+)"),
+    "num_tasks":   re.compile(r"NumTasks=(\d+)"),
+    "cpus_task":   re.compile(r"CPUs/Task=(\d+)"),
+    "tres":        re.compile(r"\bTRES=(\S+)"),
+    "gres_raw":    re.compile(r"\bGres=(\S+)"),
+    "runtime":     re.compile(r"RunTime=(\S+)"),
+    "timelimit":   re.compile(r"TimeLimit=(\S+)"),
+    "submit_time": re.compile(r"SubmitTime=(\S+)"),
+    "start_time":  re.compile(r"StartTime=(\S+)"),
+    "end_time":    re.compile(r"EndTime=(\S+)"),
+    "nodelist":    re.compile(r"NodeList=(\S+)"),
+    "batch_host":  re.compile(r"BatchHost=(\S+)"),
+    "exit_code":   re.compile(r"ExitCode=(\S+)"),
+    "mem_cpu":     re.compile(r"MinMemoryCPU=(\S+)"),
+    "mem_node":    re.compile(r"MinMemoryNode=(\S+)"),
+    "workdir":     re.compile(r"WorkDir=(.+)"),
+    "command":     re.compile(r"Command=(.+)"),
+    "stdout":      re.compile(r"StdOut=(.+)"),
+    "stderr":      re.compile(r"StdErr=(.+)"),
+}
+
+
+def collect_job_detail(jobid):
+    if not re.match(r"^\d+(_\d+)?$", str(jobid)):
+        raise ValueError(f"Invalid job ID: {jobid!r}")
+    text = _run(["scontrol", "show", "job", str(jobid)])
+
+    info = {}
+    for key, rx in _JOB_RE.items():
+        m = rx.search(text)
+        info[key] = m.group(1).strip() if m else None
+
+    # GPU count + type from TRES, then fall back to Gres field
+    tres = info.get("tres") or ""
+    gpu_count, gpu_type = 0, None
+    m = re.search(r"gres/gpu:([a-zA-Z0-9_]+)=(\d+)", tres)
+    if m:
+        gpu_type, gpu_count = m.group(1), int(m.group(2))
+    else:
+        m = re.search(r"gres/gpu=(\d+)", tres)
+        if m:
+            gpu_count = int(m.group(1))
+    gres_raw = info.get("gres_raw") or ""
+    if not gpu_type and gres_raw not in ("", "(null)"):
+        m = _GRES_GPU_RE.search(gres_raw)
+        if m:
+            gpu_type = m.group(1)
+            if not gpu_count:
+                gpu_count = int(m.group(2))
+    info["gpu_count"] = gpu_count
+    info["gpu_type"]  = gpu_type
+    return info
+
+
+_JOB_CSS = """\
+  :root {
+    --bg:#0f1115;--panel:#171a21;--border:#2a2f3a;--text:#e6e9ef;
+    --muted:#8b93a3;--accent:#4f8cff;--good:#3ec97c;--warn:#f0a93f;--bad:#ef5b5b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:var(--bg);color:var(--text);font-size:14px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header{padding:16px 24px;border-bottom:1px solid var(--border);
+         display:flex;align-items:center;gap:16px}
+  header h1{margin:0;font-size:18px;font-weight:600}
+  main{padding:24px;max-width:960px;margin:0 auto}
+  .job-title{font-size:22px;font-weight:700;margin:0 0 4px}
+  .job-name{color:var(--muted);font-size:15px;margin-bottom:16px}
+  .reason-note{background:rgba(240,169,63,.1);border:1px solid rgba(240,169,63,.3);
+               border-radius:6px;padding:8px 12px;color:var(--warn);
+               font-size:13px;margin-bottom:20px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px}
+  .card.full{grid-column:1/-1}
+  .card-title{color:var(--muted);font-size:11px;text-transform:uppercase;
+              letter-spacing:.05em;margin-bottom:10px;font-weight:600}
+  table.info{width:100%;border-collapse:collapse;font-size:13px}
+  table.info td{padding:5px 0;border-bottom:1px solid rgba(42,47,58,.7);vertical-align:top}
+  table.info tr:last-child td{border-bottom:none}
+  td.lbl{color:var(--muted);width:110px;white-space:nowrap;padding-right:12px}
+  code{color:var(--accent);font-size:12px;word-break:break-all}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;
+        font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+  .running,.completing{background:rgba(240,169,63,.15);color:var(--warn)}
+  .pending{background:rgba(79,140,255,.15);color:var(--accent)}
+  .completed{background:rgba(62,201,124,.15);color:var(--good)}
+  .failed,.cancelled,.timeout,.node_fail{background:rgba(239,91,91,.15);color:var(--bad)}
+  .other{background:rgba(139,147,163,.15);color:var(--muted)}
+"""
+
+
+def render_job_page(jobid):
+    def esc(v):
+        return _html.escape(str(v)) if v not in (None, "(null)", "N/A", "") else "—"
+
+    try:
+        info = collect_job_detail(jobid)
+    except Exception as exc:
+        return (f'<!DOCTYPE html><html><head><meta charset="utf-8"><title>Job {esc(jobid)}</title>'
+                f'<style>{_JOB_CSS}</style></head>'
+                f'<body><header><a href="/">&#8592; Dashboard</a>'
+                f'<h1>&#9881; Slurm Dashboard</h1></header>'
+                f'<main><p style="color:var(--bad)">Error: {esc(str(exc))}</p></main>'
+                f'</body></html>')
+
+    state    = (info.get("state") or "UNKNOWN").upper()
+    pill_cls = state.lower().replace(" ", "_")
+    if pill_cls not in {"running", "completing", "pending", "completed",
+                        "failed", "cancelled", "timeout", "node_fail"}:
+        pill_cls = "other"
+
+    gpu_str = (f"{info['gpu_count']}× {info['gpu_type'] or 'gpu'}"
+               if info.get("gpu_count") else "")
+
+    reason = info.get("reason")
+    reason_html = (f'<div class="reason-note">Reason: {esc(reason)}</div>'
+                   if reason and reason not in ("None", "(null)") else "")
+
+    def row(label, val, code=False):
+        v = esc(val)
+        if v == "—":
+            return ""
+        inner = f"<code>{v}</code>" if code else v
+        return f"<tr><td class='lbl'>{label}</td><td>{inner}</td></tr>"
+
+    def card(title, *rows, full=False):
+        body = "".join(rows)
+        if not body:
+            return ""
+        cls = "card full" if full else "card"
+        return (f'<div class="{cls}"><div class="card-title">{title}</div>'
+                f'<table class="info">{body}</table></div>')
+
+    mem = info.get("mem_cpu") or info.get("mem_node")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Job {esc(str(jobid))} — Slurm Dashboard</title>
+<style>{_JOB_CSS}</style>
+</head>
+<body>
+<header>
+  <a href="/">&#8592; Dashboard</a>
+  <h1>&#9881; Slurm Dashboard</h1>
+</header>
+<main>
+  <div class="job-title">Job {esc(str(jobid))} &nbsp;<span class="pill {pill_cls}">{state}</span></div>
+  <div class="job-name">{esc(info.get('job_name'))}</div>
+  {reason_html}
+  <div class="grid">
+    {card("Identity",
+          row("User",      info.get("user")),
+          row("Account",   info.get("account")),
+          row("QOS",       info.get("qos")),
+          row("Partition", info.get("partition")),
+          row("Priority",  info.get("priority")),
+          row("Exit code", info.get("exit_code")))}
+    {card("Resources",
+          row("Nodes",       info.get("num_nodes")),
+          row("CPUs",        info.get("num_cpus")),
+          row("Tasks",       info.get("num_tasks")),
+          row("CPUs / task", info.get("cpus_task")),
+          row("GPUs",        gpu_str or None),
+          row("Memory",      mem),
+          row("TRES",        info.get("tres")))}
+    {card("Timing",
+          row("Submit",     info.get("submit_time")),
+          row("Start",      info.get("start_time")),
+          row("End",        info.get("end_time")),
+          row("Run time",   info.get("runtime")),
+          row("Time limit", info.get("timelimit")))}
+    {card("Nodes",
+          row("Node list",  info.get("nodelist")),
+          row("Batch host", info.get("batch_host")))}
+    {card("Paths",
+          row("Work dir", info.get("workdir"), code=True),
+          row("Command",  info.get("command"),  code=True),
+          row("Stdout",   info.get("stdout"),   code=True),
+          row("Stderr",   info.get("stderr"),   code=True),
+          full=True)}
+  </div>
+</main>
+</body>
+</html>"""
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +849,7 @@ function buildJobSubTable(jobs, isPending) {
   const rows = jobs.map(j => {
     const gresCell = j.gres ? `<span class="muted">${j.gres}</span>` : '<span class="muted">—</span>';
     return `<tr>
-      <td>${j.id}</td>
+      <td><a href="/job/${j.id}" style="color:var(--accent);border-bottom:1px dotted var(--accent)">${j.id}</a></td>
       <td>${j.user}</td>
       <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${j.name}">${j.name}</td>
       <td>${j.cpus}</td>
@@ -820,6 +1026,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             body = render_page()
+            self.send_response(200)
+            self.send_header("Content-Type",   "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control",  "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path.startswith("/job/"):
+            jobid = self.path[5:].strip("/").split("?")[0]
+            body  = render_job_page(jobid).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type",   "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
