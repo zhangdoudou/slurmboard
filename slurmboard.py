@@ -310,7 +310,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .part-name-link { cursor: pointer; border-bottom: 1px dotted var(--text); }
   .part-name-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
   .th-refresh, .row-refresh {
-    color: var(--muted); font-size: 13px; cursor: pointer; margin-left: 5px;
+    color: var(--muted); font-size: 13px; cursor: pointer; margin-left: 8px;
   }
   .th-refresh:hover, .row-refresh:hover { color: var(--accent); }
   .th-refresh.loading, .row-refresh.loading { color: var(--accent); opacity: 0.5; pointer-events: none; }
@@ -380,7 +380,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <table id="part-table">
     <thead><tr>
       <th class="no-sort toggle-cell" style="width:52px">
-        <span id="part-th-toggle" title="Expand/collapse all">▶</span><span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span>
+        <span id="part-th-toggle" title="Expand/collapse all">▶</span> <span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span>
       </th>
       <th data-k="name"          data-label="Partition">Partition</th>
       <th data-k="avail"         data-label="Avail">Avail</th>
@@ -710,7 +710,7 @@ function renderPartitions() {
     const tr = document.createElement('tr');
     tr.className = 'part-row';
     tr.innerHTML = `
-      <td class="toggle-cell">${cur ? '▼' : '▶'}${rowRefreshHtml}</td>
+      <td class="toggle-cell">${cur ? '▼' : '▶'} ${rowRefreshHtml}</td>
       <td><b class="part-name-link">${p.name}</b></td>
       <td>${p.avail}</td>
       <td>${p.timelimit}</td>
