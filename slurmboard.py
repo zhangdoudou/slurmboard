@@ -305,15 +305,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   tr:hover > td { background: rgba(255,255,255,.03); }
 
   /* partition row */
-  .toggle-cell { width: 28px; text-align: center; color: var(--muted); font-size: 11px; cursor: pointer; }
+  .toggle-cell { width: 52px; text-align: center; color: var(--muted); font-size: 11px; cursor: pointer; }
   .toggle-cell:hover { color: var(--text); }
   .part-name-link { cursor: pointer; border-bottom: 1px dotted var(--text); }
   .part-name-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
   .th-refresh, .row-refresh {
-    color: var(--muted); font-size: inherit; cursor: pointer;
+    color: var(--muted); font-size: 13px; cursor: pointer; margin-left: 5px;
   }
-  .th-refresh { margin-right: 6px; }
-  .row-refresh { margin-right: 10px; }
   .th-refresh:hover, .row-refresh:hover { color: var(--accent); }
   .th-refresh.loading, .row-refresh.loading { color: var(--accent); opacity: 0.5; pointer-events: none; }
 
@@ -381,8 +379,10 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   </div>
   <table id="part-table">
     <thead><tr>
-      <th class="no-sort toggle-cell" id="part-th-toggle">▶</th>
-      <th data-k="name"          data-label="Partition"><span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span> Partition</th>
+      <th class="no-sort toggle-cell" style="width:52px">
+        <span id="part-th-toggle" title="Expand/collapse all">▶</span><span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span>
+      </th>
+      <th data-k="name"          data-label="Partition">Partition</th>
       <th data-k="avail"         data-label="Avail">Avail</th>
       <th data-k="timelimit"     data-label="Time limit">Time limit</th>
       <th data-k="nodes"         data-label="Nodes">Nodes</th>
@@ -407,7 +407,9 @@ async function refreshData(partName) {
   const key = partName || '*';
   if (refreshingParts.has(key)) return;
   refreshingParts.add(key);
-  renderPartitions(); // shows loading state via updatePartHeaders
+  const hdrBtn = document.getElementById('part-th-refresh');
+  if (hdrBtn) hdrBtn.classList.add('loading');
+  renderPartitions();
 
   try {
     const resp = await fetch('/data');
@@ -442,6 +444,7 @@ async function refreshData(partName) {
   }
 
   refreshingParts.delete(key);
+  if (hdrBtn) hdrBtn.classList.remove('loading');
   renderPartitions();
 }
 
@@ -494,23 +497,19 @@ function updatePartHeaders() {
     const key   = th.dataset.k;
     const label = th.dataset.label;
     const idx   = partSortList.findIndex(s => s.key === key);
-    // Preserve refresh button if present in this th
-    const prevRefresh = th.querySelector('.th-refresh');
-    const refreshHtml = prevRefresh ? prevRefresh.outerHTML + ' ' : '';
-    const arrow = idx >= 0 ? (partSortList[idx].dir > 0 ? ' ↑' : ' ↓') : '';
-    const badge = (idx >= 0 && partSortList.length > 1)
-      ? ' ' + (badges[idx] || String(idx + 1)) : '';
-    th.innerHTML = refreshHtml + label + arrow + badge;
+    if (idx < 0) { th.textContent = label; return; }
+    const arrow = partSortList[idx].dir > 0 ? ' ↑' : ' ↓';
+    const badge = partSortList.length > 1 ? ' ' + (badges[idx] || String(idx + 1)) : '';
+    th.textContent = label + arrow + badge;
   });
-  // Re-wire after innerHTML replacement destroyed old listeners
-  const thRefresh = document.getElementById('part-th-refresh');
-  if (thRefresh) {
-    if (refreshingParts.has('*')) thRefresh.classList.add('loading');
-    thRefresh.onclick = (e) => { e.stopPropagation(); refreshData(); };
-  }
 }
 
 function wirePartHeaders() {
+  // header refresh button
+  document.getElementById('part-th-refresh').addEventListener('click', () => {
+    refreshData();
+  });
+
   // header toggle: expand all nodes / collapse all
   document.getElementById('part-th-toggle').addEventListener('click', () => {
     const vramMin  = parseInt(document.getElementById('vram-min').value) || 0;
@@ -711,8 +710,8 @@ function renderPartitions() {
     const tr = document.createElement('tr');
     tr.className = 'part-row';
     tr.innerHTML = `
-      <td class="toggle-cell">${cur ? '▼' : '▶'}</td>
-      <td>${rowRefreshHtml}<b class="part-name-link">${p.name}</b></td>
+      <td class="toggle-cell">${cur ? '▼' : '▶'}${rowRefreshHtml}</td>
+      <td><b class="part-name-link">${p.name}</b></td>
       <td>${p.avail}</td>
       <td>${p.timelimit}</td>
       <td>${p.nodes}</td>
