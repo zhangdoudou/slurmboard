@@ -15,6 +15,7 @@ Usage:
 import argparse
 import html as _html
 import json
+import os
 import re
 import subprocess
 import getpass
@@ -148,17 +149,18 @@ def collect_partitions():
 def collect_job_counts():
     """Return {partition: {running, pending, jobs: [...]}} from squeue."""
     # %P partition  %i jobid  %u user  %j name  %T state
-    # %M elapsed/queue time  %C cpus  %b gres  %R reason/nodelist
-    text = _run(["squeue", "-h", "-o", "%P|%i|%u|%j|%T|%M|%C|%b|%R"])
+    # %M elapsed/queue time  %C cpus  %b gres  %R reason/nodelist  %V submit time
+    text = _run(["squeue", "-h", "-o", "%P|%i|%u|%j|%T|%M|%C|%b|%R|%V"])
     counts = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        parts = line.split("|", 8)  # maxsplit keeps %R intact if it contains |
+        parts = line.split("|", 9)  # maxsplit keeps %V intact
         if len(parts) < 9:
             continue
-        part, jid, user, name, state, time_used, cpus, gres, reason = parts
+        part, jid, user, name, state, time_used, cpus, gres, reason = parts[:9]
+        submit = parts[9] if len(parts) > 9 else None
         state_up = state.upper()
         c = counts.setdefault(part, {"running": 0, "pending": 0, "jobs": []})
         if state_up == "RUNNING":
@@ -175,8 +177,27 @@ def collect_job_counts():
             "gres":      gres if gres not in ("", "N/A") else None,
             "reason":    reason,
             "partition": part,
+            "submit":    submit,
         })
     return counts
+
+
+_JOBS_HIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs_history.json")
+_JOBS_HIST_TTL  = 7 * 24 * 3600  # seconds
+
+def _load_job_hist():
+    try:
+        with open(_JOBS_HIST_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_job_hist(hist):
+    try:
+        with open(_JOBS_HIST_PATH, "w") as f:
+            json.dump(hist, f)
+    except Exception:
+        pass
 
 
 def build_snapshot():
@@ -239,12 +260,32 @@ def build_snapshot():
         agg["gpu_vram_gb"] = max(vram_vals) if vram_vals else None
         partitions.append(agg)
 
+    current_user = getpass.getuser()
+
+    # Update persistent job history
+    hist     = _load_job_hist()
+    now_ts   = time.time()
+    active   = set()
+    for jc_data in job_counts.values():
+        for j in jc_data["jobs"]:
+            if j["user"] == current_user:
+                active.add(j["id"])
+                hist[j["id"]] = {**j, "last_seen": now_ts, "done": False}
+    for jid in list(hist.keys()):
+        jdata = hist[jid]
+        if jid not in active and not jdata.get("done"):
+            hist[jid] = {**jdata, "done": True, "done_at": now_ts}
+        if now_ts - jdata.get("done_at", jdata.get("last_seen", 0)) > _JOBS_HIST_TTL:
+            del hist[jid]
+    _save_job_hist(hist)
+
     return {
-        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "current_user": getpass.getuser(),
-        "summary":    summary,
-        "partitions": partitions,
-        "nodes":      nodes,
+        "generated_at":    time.strftime("%Y-%m-%d %H:%M:%S"),
+        "current_user":    current_user,
+        "user_jobs":       list(hist.values()),
+        "summary":         summary,
+        "partitions":      partitions,
+        "nodes":           nodes,
     }
 
 
@@ -470,15 +511,19 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-         background: var(--bg); color: var(--text); font-size: 14px; }
-  header { padding: 16px 24px; border-bottom: 1px solid var(--border);
+         background: var(--bg); color: var(--text); font-size: 14px;
+         display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  header { flex-shrink: 0; padding: 12px 24px; border-bottom: 1px solid var(--border);
            display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
   header h1 { margin: 0; font-size: 20px; font-weight: 600; }
   header .meta { color: var(--muted); font-size: 12px; }
   header .reload { margin-left: auto; background: var(--accent); color: #fff; border: none;
                    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
   header .reload:hover { filter: brightness(1.1); }
-  main { padding: 20px 24px 60px; max-width: 1800px; margin: 0 auto; }
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column;
+         padding: 12px 20px 0; overflow: hidden; }
+  footer { flex-shrink: 0; text-align: center; color: var(--muted); font-size: 11px;
+           padding: 7px 20px; border-top: 1px solid var(--border); }
   h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
        margin: 32px 0 12px; }
   .hint { font-size: 12px; color: var(--muted); margin: -8px 0 12px; }
@@ -490,6 +535,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
   .card .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
   .card .sub   { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  /* compact cards for sidebar — single column */
+  .left-col .cards { grid-template-columns: 1fr; gap: 6px; }
+  .left-col .card { padding: 8px 12px; }
+  .left-col .card .label { font-size: 11px; }
+  .left-col .card .value { font-size: 15px; line-height: 1.3; }
+  .left-col .card .sub { display: none; }
+  .left-col .card .bar { height: 5px; margin-top: 5px; }
 
   /* progress bars */
   .bar { height: 8px; border-radius: 4px; background: #2a2f3a; margin-top: 10px; overflow: hidden; }
@@ -506,6 +558,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   table { width: 100%; border-collapse: collapse; background: var(--panel);
           border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
   th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  /* compact partition table to avoid horizontal scroll */
+  #part-table th, #part-table td { padding: 5px 7px; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase;
        letter-spacing: .04em; cursor: pointer; user-select: none; }
   th.no-sort { cursor: default; }
@@ -551,24 +605,37 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   }
   .muted { color: var(--muted); }
   code { color: var(--accent); }
-  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px; }
-
-  /* three-column layout */
-  .three-col { display: grid; grid-template-columns: 280px 1fr 300px; gap: 24px; align-items: start; }
-  .left-col, .center-col, .right-col { min-width: 0; overflow-x: auto; }
+  /* three-column layout with draggable resizers */
+  .three-col  { flex: 1; min-height: 0; display: flex; flex-direction: row; overflow: hidden; }
+  .left-col   { width: 25%; min-width: 100px; flex-shrink: 0; overflow: auto; padding: 0 16px 20px 0; }
+  .center-col { flex: 1; min-width: 0; overflow: auto; padding: 0 16px 20px; }
+  .right-col  { width: 25%; min-width: 180px; flex-shrink: 0; overflow: auto; padding: 0 0 20px 16px; }
+  .col-resizer { width: 4px; flex-shrink: 0; background: var(--border); cursor: col-resize;
+                 user-select: none; position: relative; transition: background .15s; }
+  .col-resizer:hover, .col-resizer.dragging { background: var(--accent); }
+  .col-resizer::after { content: ''; position: absolute; inset: 0 -5px; }
   .left-col h2:first-child, .center-col h2:first-child, .right-col h2:first-child { margin-top: 0; }
 
   /* compact tables in left/right sidebars */
   .left-col table { font-size: 12px; }
   .left-col th, .left-col td { padding: 5px 8px; }
-  .right-col table { font-size: 12px; }
-  .right-col th, .right-col td { padding: 5px 8px; }
-  .right-col .minibar { width: 40px; }
 
-  /* user jobs state colors */
-  .uj-running  { color: var(--good); font-weight: 600; font-size: 11px; }
-  .uj-pending  { color: var(--warn); font-weight: 600; font-size: 11px; }
-  .uj-other    { color: var(--muted); font-weight: 600; font-size: 11px; }
+  /* user jobs table — same padding as partition table */
+  #uj-table th, #uj-table td { padding: 5px 7px; }
+  .uj-id { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
+  .uj-id:hover { color: #fff; }
+  .uj-chip { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px;
+             font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+  .uj-chip.running, .uj-chip.completing { background: rgba(62,201,124,.15); color: var(--good); }
+  .uj-chip.pending  { background: rgba(240,169,63,.15);  color: var(--warn); }
+  .uj-chip.other    { background: rgba(139,147,163,.15); color: var(--muted); }
+  .uj-chip.done     { background: rgba(79,140,255,.1);   color: var(--accent); }
+  /* sort bar */
+  .uj-sortbar { display: flex; gap: 4px; }
+  .uj-sort { background: transparent; border: 1px solid var(--border); color: var(--muted);
+             font-size: 10px; padding: 2px 7px; border-radius: 4px; cursor: pointer; }
+  .uj-sort:hover { color: var(--text); }
+  .uj-sort.active { border-color: var(--accent); color: var(--accent); }
 </style>
 </head>
 <body>
@@ -591,13 +658,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
           <th class="no-sort">Alloc</th>
           <th class="no-sort">Idle</th>
           <th class="no-sort">Total</th>
-          <th class="no-sort">Usage</th>
+          <th class="no-sort">Idle%</th>
           <th class="no-sort">Nodes</th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </aside>
-
+    <div class="col-resizer" id="resizer-left" title="Drag to resize"></div>
     <section class="center-col">
       <h2>Partitions</h2>
       <p class="hint">
@@ -622,22 +689,22 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
           <th data-k="timelimit"     data-label="Time limit">Time limit</th>
           <th data-k="nodes"         data-label="Nodes">Nodes</th>
           <th data-k="jobs_pending"  data-label="Jobs (run/pend)">Jobs (run/pend)</th>
-          <th data-k="cpu_total"     data-label="CPU (alloc/total)">CPU (alloc/total)</th>
+          <th data-k="cpu_total"     data-label="CPU (idle/total)">CPU (idle/total)</th>
           <th data-k="gpu_vram_gb"   data-label="VRAM (GB)">VRAM (GB)</th>
           <th data-k="gpu_idle"      data-label="GPU (idle/total)">GPU (idle/total)</th>
         </tr></thead>
         <tbody id="part-tbody"></tbody>
       </table>
     </section>
-
+    <div class="col-resizer" id="resizer-right" title="Drag to resize"></div>
     <aside class="right-col">
-      <h2>My Jobs <span id="my-jobs-user" class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0"></span></h2>
+      <h2>My Jobs <span id="my-jobs-user" class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0"></span> <span id="uj-refresh-btn" class="th-refresh" title="Refresh">&#x21bb;</span></h2>
       <div id="user-jobs-panel"></div>
     </aside>
 
   </div>
-  <footer>slurmboard &middot; data sourced live from <code>sinfo</code> / <code>scontrol</code> on this login node &middot; reload to refresh</footer>
 </main>
+<footer>slurmboard &middot; data sourced live from <code>sinfo</code> / <code>scontrol</code> on this login node &middot; reload to refresh</footer>
 
 <script>
 let SNAPSHOT = __SNAPSHOT_JSON__;
@@ -699,6 +766,8 @@ function fmtMem(mb) {
   return mb + ' MB';
 }
 function barClass(p) { return p >= 90 ? 'crit' : p >= 70 ? 'high' : ''; }
+// For idle-ratio bars: low idle = warn/crit; normal idle = green (gpu class)
+function idleBarClass(p) { return p <= 10 ? 'crit' : p <= 30 ? 'high' : 'gpu'; }
 function statePill(state) {
   const s = state.toLowerCase();
   const cls = s.includes('idle') ? 'idle'
@@ -789,9 +858,9 @@ function wirePartHeaders() {
 
 // ── render summary cards ────────────────────────────────────────────────────
 function renderSummary(s) {
-  const cpuPct = pct(s.cpu_alloc, s.cpu_total);
-  const memPct = pct(s.mem_alloc_mb, s.mem_total_mb);
-  const gpuPct = pct(s.gpu_alloc,   s.gpu_total);
+  const cpuIdle = pct(s.cpu_total - s.cpu_alloc, s.cpu_total);
+  const memIdle = pct(s.mem_total_mb - s.mem_alloc_mb, s.mem_total_mb);
+  const gpuIdle = pct(s.gpu_total   - s.gpu_alloc,   s.gpu_total);
   const states = Object.entries(s.node_states).sort((a,b) => b[1]-a[1])
       .map(([k,v]) => `${v} ${k.toLowerCase()}`).join(', ');
   document.getElementById('summary-cards').innerHTML = `
@@ -802,21 +871,21 @@ function renderSummary(s) {
     </div>
     <div class="card">
       <div class="label">CPUs</div>
-      <div class="value">${s.cpu_alloc} / ${s.cpu_total}</div>
-      <div class="sub">${cpuPct}% allocated</div>
-      <div class="bar ${barClass(cpuPct)}"><span style="width:${cpuPct}%"></span></div>
+      <div class="value">${s.cpu_total - s.cpu_alloc} / ${s.cpu_total}</div>
+      <div class="sub">${cpuIdle}% idle</div>
+      <div class="bar ${idleBarClass(cpuIdle)}"><span style="width:${cpuIdle}%"></span></div>
     </div>
     <div class="card">
       <div class="label">Memory</div>
-      <div class="value">${fmtMem(s.mem_alloc_mb)} / ${fmtMem(s.mem_total_mb)}</div>
-      <div class="sub">${memPct}% allocated</div>
-      <div class="bar ${barClass(memPct)}"><span style="width:${memPct}%"></span></div>
+      <div class="value">${fmtMem(s.mem_total_mb - s.mem_alloc_mb)} / ${fmtMem(s.mem_total_mb)}</div>
+      <div class="sub">${memIdle}% idle</div>
+      <div class="bar ${idleBarClass(memIdle)}"><span style="width:${memIdle}%"></span></div>
     </div>
     <div class="card">
       <div class="label">GPUs</div>
-      <div class="value">${s.gpu_total - s.gpu_alloc} <span style="font-size:16px;font-weight:400;color:var(--muted)">idle / ${s.gpu_total}</span></div>
-      <div class="sub">${gpuPct}% allocated &middot; ${s.gpu_total - s.gpu_alloc} idle</div>
-      <div class="bar gpu ${barClass(gpuPct)}"><span style="width:${gpuPct}%"></span></div>
+      <div class="value">${s.gpu_total - s.gpu_alloc} <span style="font-size:13px;font-weight:400;color:var(--muted)">idle / ${s.gpu_total}</span></div>
+      <div class="sub">${gpuIdle}% idle</div>
+      <div class="bar ${idleBarClass(gpuIdle)}"><span style="width:${gpuIdle}%"></span></div>
     </div>`;
 }
 
@@ -829,13 +898,13 @@ function renderGpuTable(byType) {
     return;
   }
   tbody.innerHTML = entries.map(([type, v]) => {
-    const p = pct(v.alloc, v.total);
+    const idlePct = pct(v.total - v.alloc, v.total);
     return `<tr>
       <td><b>${type}</b></td>
       <td>${v.alloc}</td>
       <td>${v.total - v.alloc}</td>
       <td>${v.total}</td>
-      <td>${minibar(p, 'gpu')}${p}%</td>
+      <td>${minibar(idlePct, 'gpu')}${idlePct}%</td>
       <td>${v.nodes}</td>
     </tr>`;
   }).join('');
@@ -850,8 +919,8 @@ function buildNodeSubTable(partName) {
     return '<div style="padding:10px;color:var(--muted)">No nodes in this partition.</div>';
 
   const rows = nodes.map(n => {
-    const cpuP = pct(n.cpu_alloc, n.cpu_total);
-    const memP = pct(n.mem_alloc_mb, n.mem_total_mb);
+    const cpuIdleP = pct(n.cpu_total - n.cpu_alloc, n.cpu_total);
+    const memIdleP = pct(n.mem_total_mb - n.mem_alloc_mb, n.mem_total_mb);
     const gpuCell = n.gpu_total
       ? minibar(pct(n.gpu_idle, n.gpu_total), 'gpu') + `${n.gpu_idle} / ${n.gpu_total}`
       : '<span class="muted">—</span>';
@@ -859,9 +928,9 @@ function buildNodeSubTable(partName) {
     return `<tr>
       <td><b>${n.name}</b></td>
       <td>${statePill(n.state)}</td>
-      <td>${minibar(cpuP)}${n.cpu_alloc} / ${n.cpu_total}</td>
+      <td>${minibar(cpuIdleP, 'gpu')}${n.cpu_total - n.cpu_alloc} / ${n.cpu_total}</td>
       <td>${n.load != null ? n.load : '—'}</td>
-      <td>${minibar(memP)}${fmtMem(n.mem_alloc_mb)} / ${fmtMem(n.mem_total_mb)}</td>
+      <td>${minibar(memIdleP, 'gpu')}${fmtMem(n.mem_total_mb - n.mem_alloc_mb)} / ${fmtMem(n.mem_total_mb)}</td>
       <td>${gpuCell}</td>
       <td class="muted">${vram}</td>
     </tr>`;
@@ -869,8 +938,8 @@ function buildNodeSubTable(partName) {
 
   return `<div class="inner-wrap"><table class="inner-table">
     <thead><tr>
-      <th>Node</th><th>State</th><th>CPU (alloc/total)</th><th>Load</th>
-      <th>Memory (alloc/total)</th><th>GPU (idle/total)</th><th>VRAM</th>
+      <th>Node</th><th>State</th><th>CPU (idle/total)</th><th>Load</th>
+      <th>Memory (idle/total)</th><th>GPU (idle/total)</th><th>VRAM</th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
@@ -928,9 +997,9 @@ function renderPartitions() {
   tbody.innerHTML = '';
 
   for (const p of visible) {
-    const cur    = expandState[p.name];   // "nodes"|"running"|"pending"|undefined
-    const cpuP   = pct(p.cpu_alloc, p.cpu_total);
-    const idleP  = pct(p.gpu_idle,  p.gpu_total);
+    const cur       = expandState[p.name];   // "nodes"|"running"|"pending"|undefined
+    const cpuIdleP  = pct(p.cpu_total - p.cpu_alloc, p.cpu_total);
+    const idleP     = pct(p.gpu_idle,  p.gpu_total);
     const gpuCell = p.gpu_total
       ? minibar(idleP, 'gpu') + `${p.gpu_idle} / ${p.gpu_total}`
       : '<span class="muted">—</span>';
@@ -959,7 +1028,7 @@ function renderPartitions() {
       <td>${p.timelimit}</td>
       <td>${p.nodes}</td>
       <td style="white-space:nowrap">${runSpan}<span class="muted"> · </span>${pendSpan}</td>
-      <td>${minibar(cpuP)}${p.cpu_alloc} / ${p.cpu_total}</td>
+      <td>${minibar(cpuIdleP, 'gpu')}${p.cpu_total - p.cpu_alloc} / ${p.cpu_total}</td>
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
 
@@ -1016,70 +1085,149 @@ function renderPartitions() {
 }
 
 // ── user jobs panel ─────────────────────────────────────────────────────────
+let ujSortKey = 'state', ujSortDir = 1;
+
 function renderUserJobs() {
   const user = SNAPSHOT.current_user || '';
   const userEl = document.getElementById('my-jobs-user');
   if (userEl) userEl.textContent = user ? `(${user})` : '';
 
-  // Collect all jobs from all partitions, deduplicated by job ID, filtered to current user
-  const seen = new Set();
-  const allJobs = [];
-  for (const p of SNAPSHOT.partitions) {
-    for (const j of (p.jobs || [])) {
-      if (seen.has(j.id)) continue;
-      if (j.user !== user) continue;
-      seen.add(j.id);
-      allJobs.push(j);
-    }
-  }
-
+  // History maintained server-side in ~/.slurmboard_jobs.json
+  const allJobs = SNAPSHOT.user_jobs || [];
   const panel = document.getElementById('user-jobs-panel');
   if (!allJobs.length) {
-    panel.innerHTML = '<p class="muted" style="font-size:13px;margin:4px 0">No jobs in queue.</p>';
+    panel.innerHTML = '<p class="muted" style="font-size:13px;margin:4px 0">No jobs found.</p>';
     return;
   }
 
-  // Sort: running/completing first, then pending, then others
-  const stateRank = j => j.state === 'RUNNING' || j.state === 'COMPLETING' ? 0
-                       : j.state === 'PENDING' ? 1 : 2;
-  allJobs.sort((a, b) => stateRank(a) - stateRank(b));
+  // Sort
+  const stateRank = j => j.done ? 3
+    : j.state === 'RUNNING' || j.state === 'COMPLETING' ? 0
+    : j.state === 'PENDING' ? 1 : 2;
+  const numId = j => parseInt(j.id) || 0;
+  allJobs.sort((a, b) => {
+    let cmp = 0;
+    if      (ujSortKey === 'state')     cmp = stateRank(a) - stateRank(b) || numId(b) - numId(a);
+    else if (ujSortKey === 'id')        cmp = numId(a) - numId(b);
+    else if (ujSortKey === 'time')      cmp = a.time.localeCompare(b.time);
+    else if (ujSortKey === 'partition') cmp = (a.partition||'').localeCompare(b.partition||'');
+    else if (ujSortKey === 'submit')    cmp = (a.submit||'').localeCompare(b.submit||'');
+    return ujSortDir * cmp;
+  });
 
-  const nRun  = allJobs.filter(j => j.state === 'RUNNING' || j.state === 'COMPLETING').length;
-  const nPend = allJobs.filter(j => j.state === 'PENDING').length;
-  const nOth  = allJobs.length - nRun - nPend;
+  const nRun  = allJobs.filter(j => !j.done && (j.state==='RUNNING'||j.state==='COMPLETING')).length;
+  const nPend = allJobs.filter(j => !j.done && j.state==='PENDING').length;
+  const nDone = allJobs.filter(j => j.done).length;
+
+  // Slurm state → abbreviation + color (mirrors squeue output codes)
+  const STATE_ABBR = {
+    RUNNING:'R', COMPLETING:'CG', PENDING:'PD', COMPLETED:'CD',
+    FAILED:'F', CANCELLED:'CA', TIMEOUT:'TO', NODE_FAIL:'NF', PREEMPTED:'PR',
+  };
+  function stateCell(j) {
+    if (j.done) return `<span style="color:var(--accent);font-weight:700;font-size:11px">DONE</span>`;
+    const abbr  = STATE_ABBR[j.state] || j.state.slice(0,2);
+    const color = (j.state==='RUNNING'||j.state==='COMPLETING') ? 'var(--good)'
+                : j.state==='PENDING' ? 'var(--warn)' : 'var(--muted)';
+    return `<span style="color:${color};font-weight:700;font-size:11px">${abbr}</span>`;
+  }
+
+  function ujTh(key, label) {
+    const arrow = ujSortKey === key ? (ujSortDir > 0 ? ' ↑' : ' ↓') : '';
+    return `<th data-k="${key}" data-label="${label}" style="cursor:pointer;user-select:none">${label}${arrow}</th>`;
+  }
+
+  function fmtDate(s) {
+    if (!s || s === 'N/A' || s === 'Unknown') return '—';
+    const d = new Date(s.replace('T', ' '));
+    if (isNaN(d)) return s.slice(0, 10);
+    return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} `
+         + `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  }
 
   const rows = allJobs.map(j => {
-    const gres = j.gres || '—';
-    const cls  = j.state === 'RUNNING' || j.state === 'COMPLETING' ? 'uj-running'
-               : j.state === 'PENDING' ? 'uj-pending' : 'uj-other';
     const part = j.partition || '—';
-    return `<tr>
-      <td><a href="/job/${j.id}" style="color:var(--accent);border-bottom:1px dotted var(--accent)">${j.id}</a></td>
-      <td style="max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${j.name}">${j.name}</td>
-      <td><span class="${cls}">${j.state}</span></td>
-      <td class="muted">${part}</td>
-      <td>${j.cpus}</td>
-      <td class="muted">${gres}</td>
+    return `<tr style="${j.done?'opacity:.4':''}">
+      <td><a class="uj-id" href="/job/${j.id}" title="${j.name}">${j.id}</a></td>
+      <td>${stateCell(j)}</td>
+      <td class="muted" style="max-width:100px;overflow:hidden;text-overflow:ellipsis" title="${part}">${part}</td>
       <td class="muted">${j.time}</td>
+      <td class="muted">${fmtDate(j.submit)}</td>
     </tr>`;
   }).join('');
 
   panel.innerHTML = `
-    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
-      <span style="color:var(--good)">${nRun}</span> running &nbsp;·&nbsp;
-      <span style="color:var(--warn)">${nPend}</span> pending
-      ${nOth ? `&nbsp;·&nbsp; ${nOth} other` : ''}
+    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">
+      <span style="color:var(--good)">${nRun}</span> R &nbsp;·&nbsp;
+      <span style="color:var(--warn)">${nPend}</span> PD
+      ${nDone ? `&nbsp;·&nbsp; ${nDone} done` : ''}
     </div>
-    <div style="overflow-x:auto">
-      <table>
-        <thead><tr>
-          <th class="no-sort">ID</th><th class="no-sort">Name</th><th class="no-sort">State</th>
-          <th class="no-sort">Part.</th><th class="no-sort">CPU</th>
-          <th class="no-sort">GPU</th><th class="no-sort">Time</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+    <table id="uj-table">
+      <thead><tr>
+        ${ujTh('id','ID')}
+        ${ujTh('state','St')}
+        ${ujTh('partition','Partition')}
+        ${ujTh('time','Time')}
+        ${ujTh('submit','Date')}
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+
+  document.querySelectorAll('#uj-table th[data-k]').forEach(th =>
+    th.addEventListener('click', () => {
+      const key = th.dataset.k;
+      if (ujSortKey === key) ujSortDir *= -1;
+      else { ujSortKey = key; ujSortDir = 1; }
+      renderUserJobs();
+    }));
+}
+
+// ── draggable column resizers ───────────────────────────────────────────────
+function initColumnResizers() {
+  const leftCol  = document.querySelector('.left-col');
+  const rightCol = document.querySelector('.right-col');
+
+  // Restore saved widths (CSS width:25% is the default when no saved value)
+  try {
+    const saved = JSON.parse(localStorage.getItem('sb_col_w') || 'null');
+    if (saved && saved.left)  leftCol.style.width  = saved.left  + 'px';
+    if (saved && saved.right) rightCol.style.width = saved.right + 'px';
+  } catch(e) {}
+
+  function saveWidths() {
+    try {
+      localStorage.setItem('sb_col_w', JSON.stringify({
+        left:  leftCol.offsetWidth,
+        right: rightCol.offsetWidth,
+      }));
+    } catch(e) {}
+  }
+
+  function wire(id, col, sign) {
+    // sign=+1: drag right → col grows; sign=-1: drag right → col shrinks
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const startX = e.clientX, startW = col.offsetWidth;
+      el.classList.add('dragging');
+      const minW = parseInt(getComputedStyle(col).minWidth) || 100;
+      const onMove = e => {
+        col.style.width = Math.max(minW, startW + sign * (e.clientX - startX)) + 'px';
+      };
+      const onUp = () => {
+        el.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        saveWidths();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  wire('resizer-left',  leftCol,  +1);  // left resizer → left col grows/shrinks
+  wire('resizer-right', rightCol, -1);  // right resizer → right col shrinks/grows
 }
 
 // ── init ───────────────────────────────────────────────────────────────────
@@ -1088,6 +1236,8 @@ renderGpuTable(SNAPSHOT.summary.gpu_by_type);
 wirePartHeaders();
 document.getElementById('vram-min').addEventListener('input',  renderPartitions);
 document.getElementById('idle-only').addEventListener('change', renderPartitions);
+initColumnResizers();
+document.getElementById('uj-refresh-btn').addEventListener('click', () => refreshData());
 renderPartitions();
 renderUserJobs();
 </script>
