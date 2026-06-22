@@ -182,22 +182,53 @@ def collect_job_counts():
     return counts
 
 
-_JOBS_HIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs_history.json")
-_JOBS_HIST_TTL  = 7 * 24 * 3600  # seconds
+_ACTIVE_STATES = {'RUNNING', 'PENDING', 'COMPLETING', 'RESIZING', 'SUSPENDED', 'REQUEUED'}
 
-def _load_job_hist():
-    try:
-        with open(_JOBS_HIST_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _save_job_hist(hist):
-    try:
-        with open(_JOBS_HIST_PATH, "w") as f:
-            json.dump(hist, f)
-    except Exception:
-        pass
+def collect_user_jobs(current_user, days=7):
+    """Return list of user jobs from sacct (last N days)."""
+    start = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - days * 86400))
+    text = _run([
+        "sacct", "-u", current_user,
+        "--starttime", start,
+        "--noheader", "--parsable2",
+        "--format=JobID,JobName,State,Submit,Elapsed,AllocCPUS,AllocTRES,Partition",
+    ])
+    jobs = []
+    seen = set()
+    for line in text.splitlines():
+        parts = line.split("|")
+        if len(parts) < 8:
+            continue
+        jid, name, state_raw, submit, elapsed, cpus, tres, partition = parts[:8]
+        if "." in jid:  # skip .batch / .extern sub-steps
+            continue
+        if jid in seen:
+            continue
+        seen.add(jid)
+        state = state_raw.split(" ")[0]  # "CANCELLED by 3237978" → "CANCELLED"
+        gres = ""
+        for item in tres.split(","):
+            if item.startswith("gres/gpu:"):
+                gres = item
+                break
+        if not gres:
+            for item in tres.split(","):
+                if item.startswith("gres/gpu=") and item != "gres/gpu=0":
+                    gres = item
+                    break
+        jobs.append({
+            "id":        jid,
+            "name":      name,
+            "state":     state,
+            "submit":    submit,
+            "time":      elapsed,
+            "cpus":      cpus,
+            "gres":      gres or None,
+            "partition": partition,
+            "done":      state not in _ACTIVE_STATES,
+        })
+    jobs.sort(key=lambda j: j["submit"], reverse=True)
+    return jobs
 
 
 def build_snapshot():
@@ -262,27 +293,10 @@ def build_snapshot():
 
     current_user = getpass.getuser()
 
-    # Update persistent job history
-    hist     = _load_job_hist()
-    now_ts   = time.time()
-    active   = set()
-    for jc_data in job_counts.values():
-        for j in jc_data["jobs"]:
-            if j["user"] == current_user:
-                active.add(j["id"])
-                hist[j["id"]] = {**j, "last_seen": now_ts, "done": False}
-    for jid in list(hist.keys()):
-        jdata = hist[jid]
-        if jid not in active and not jdata.get("done"):
-            hist[jid] = {**jdata, "done": True, "done_at": now_ts}
-        if now_ts - jdata.get("done_at", jdata.get("last_seen", 0)) > _JOBS_HIST_TTL:
-            del hist[jid]
-    _save_job_hist(hist)
-
     return {
         "generated_at":    time.strftime("%Y-%m-%d %H:%M:%S"),
         "current_user":    current_user,
-        "user_jobs":       list(hist.values()),
+        "user_jobs":       collect_user_jobs(current_user),
         "summary":         summary,
         "partitions":      partitions,
         "nodes":           nodes,
