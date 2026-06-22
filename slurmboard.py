@@ -17,6 +17,7 @@ import html as _html
 import json
 import re
 import subprocess
+import getpass
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -165,14 +166,15 @@ def collect_job_counts():
         elif state_up == "PENDING":
             c["pending"] += 1
         c["jobs"].append({
-            "id":     jid,
-            "user":   user,
-            "name":   name,
-            "state":  state_up,
-            "time":   time_used,
-            "cpus":   cpus,
-            "gres":   gres if gres not in ("", "N/A") else None,
-            "reason": reason,
+            "id":        jid,
+            "user":      user,
+            "name":      name,
+            "state":     state_up,
+            "time":      time_used,
+            "cpus":      cpus,
+            "gres":      gres if gres not in ("", "N/A") else None,
+            "reason":    reason,
+            "partition": part,
         })
     return counts
 
@@ -239,6 +241,7 @@ def build_snapshot():
 
     return {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "current_user": getpass.getuser(),
         "summary":    summary,
         "partitions": partitions,
         "nodes":      nodes,
@@ -475,7 +478,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   header .reload { margin-left: auto; background: var(--accent); color: #fff; border: none;
                    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
   header .reload:hover { filter: brightness(1.1); }
-  main { padding: 20px 24px 60px; max-width: 1400px; margin: 0 auto; }
+  main { padding: 20px 24px 60px; max-width: 1800px; margin: 0 auto; }
   h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
        margin: 32px 0 12px; }
   .hint { font-size: 12px; color: var(--muted); margin: -8px 0 12px; }
@@ -549,6 +552,23 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .muted { color: var(--muted); }
   code { color: var(--accent); }
   footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px; }
+
+  /* three-column layout */
+  .three-col { display: grid; grid-template-columns: 280px 1fr 300px; gap: 24px; align-items: start; }
+  .left-col, .center-col, .right-col { min-width: 0; }
+  .left-col h2:first-child, .center-col h2:first-child, .right-col h2:first-child { margin-top: 0; }
+
+  /* compact tables in left/right sidebars */
+  .left-col table { font-size: 12px; }
+  .left-col th, .left-col td { padding: 5px 8px; }
+  .right-col table { font-size: 12px; }
+  .right-col th, .right-col td { padding: 5px 8px; }
+  .right-col .minibar { width: 40px; }
+
+  /* user jobs state colors */
+  .uj-running  { color: var(--good); font-weight: 600; font-size: 11px; }
+  .uj-pending  { color: var(--warn); font-weight: 600; font-size: 11px; }
+  .uj-other    { color: var(--muted); font-weight: 600; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -558,49 +578,64 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   <button class="reload" onclick="location.reload()">&#x21bb; Refresh</button>
 </header>
 <main>
-  <h2>Cluster summary</h2>
-  <div class="cards" id="summary-cards"></div>
+  <div class="three-col">
 
-  <h2>GPUs by type</h2>
-  <table id="gpu-table">
-    <thead><tr>
-      <th class="no-sort">Type</th><th class="no-sort">Allocated</th>
-      <th class="no-sort">Idle</th><th class="no-sort">Total</th>
-      <th class="no-sort">Usage</th><th class="no-sort">Nodes</th>
-    </tr></thead>
-    <tbody></tbody>
-  </table>
+    <aside class="left-col">
+      <h2>Cluster summary</h2>
+      <div class="cards" id="summary-cards"></div>
 
-  <h2>Partitions</h2>
-  <p class="hint">
-    Click a row to expand its nodes &nbsp;·&nbsp;
-    Click a column header to sort &nbsp;·&nbsp;
-    <kbd>Shift</kbd>+click to add a secondary sort key
-  </p>
-  <div class="filterbar">
-    <label>Min VRAM
-      <input id="vram-min" type="number" min="0" placeholder="GB" style="width:72px;margin-left:5px">
-    </label>
-    <label><input type="checkbox" id="idle-only">&nbsp;Idle GPUs only</label>
-    <span class="muted" id="part-count"></span>
+      <h2>GPUs by type</h2>
+      <table id="gpu-table">
+        <thead><tr>
+          <th class="no-sort">Type</th>
+          <th class="no-sort">Alloc</th>
+          <th class="no-sort">Idle</th>
+          <th class="no-sort">Total</th>
+          <th class="no-sort">Usage</th>
+          <th class="no-sort">Nodes</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </aside>
+
+    <section class="center-col">
+      <h2>Partitions</h2>
+      <p class="hint">
+        Click a row to expand its nodes &nbsp;·&nbsp;
+        Click a column header to sort &nbsp;·&nbsp;
+        <kbd>Shift</kbd>+click to add a secondary sort key
+      </p>
+      <div class="filterbar">
+        <label>Min VRAM
+          <input id="vram-min" type="number" min="0" placeholder="GB" style="width:72px;margin-left:5px">
+        </label>
+        <label><input type="checkbox" id="idle-only">&nbsp;Idle GPUs only</label>
+        <span class="muted" id="part-count"></span>
+      </div>
+      <table id="part-table">
+        <thead><tr>
+          <th class="no-sort toggle-cell" style="width:52px">
+            <span id="part-th-toggle" title="Expand/collapse all">▶</span> <span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span>
+          </th>
+          <th data-k="name"          data-label="Partition">Partition</th>
+          <th data-k="avail"         data-label="Avail">Avail</th>
+          <th data-k="timelimit"     data-label="Time limit">Time limit</th>
+          <th data-k="nodes"         data-label="Nodes">Nodes</th>
+          <th data-k="jobs_pending"  data-label="Jobs (run/pend)">Jobs (run/pend)</th>
+          <th data-k="cpu_total"     data-label="CPU (alloc/total)">CPU (alloc/total)</th>
+          <th data-k="gpu_vram_gb"   data-label="VRAM (GB)">VRAM (GB)</th>
+          <th data-k="gpu_idle"      data-label="GPU (idle/total)">GPU (idle/total)</th>
+        </tr></thead>
+        <tbody id="part-tbody"></tbody>
+      </table>
+    </section>
+
+    <aside class="right-col">
+      <h2>My Jobs <span id="my-jobs-user" class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0"></span></h2>
+      <div id="user-jobs-panel"></div>
+    </aside>
+
   </div>
-  <table id="part-table">
-    <thead><tr>
-      <th class="no-sort toggle-cell" style="width:52px">
-        <span id="part-th-toggle" title="Expand/collapse all">▶</span> <span id="part-th-refresh" class="th-refresh" title="Refresh all partitions">&#x21bb;</span>
-      </th>
-      <th data-k="name"          data-label="Partition">Partition</th>
-      <th data-k="avail"         data-label="Avail">Avail</th>
-      <th data-k="timelimit"     data-label="Time limit">Time limit</th>
-      <th data-k="nodes"         data-label="Nodes">Nodes</th>
-      <th data-k="jobs_pending"  data-label="Jobs (run/pend)">Jobs (run/pend)</th>
-      <th data-k="cpu_total"     data-label="CPU (alloc/total)">CPU (alloc/total)</th>
-      <th data-k="gpu_vram_gb"   data-label="VRAM (GB)">VRAM (GB)</th>
-      <th data-k="gpu_idle"      data-label="GPU (idle/total)">GPU (idle/total)</th>
-    </tr></thead>
-    <tbody id="part-tbody"></tbody>
-  </table>
-
   <footer>slurmboard &middot; data sourced live from <code>sinfo</code> / <code>scontrol</code> on this login node &middot; reload to refresh</footer>
 </main>
 
@@ -653,6 +688,7 @@ async function refreshData(partName) {
   refreshingParts.delete(key);
   if (hdrBtn) hdrBtn.classList.remove('loading');
   renderPartitions();
+  renderUserJobs();
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -979,6 +1015,73 @@ function renderPartitions() {
   updatePartHeaders();
 }
 
+// ── user jobs panel ─────────────────────────────────────────────────────────
+function renderUserJobs() {
+  const user = SNAPSHOT.current_user || '';
+  const userEl = document.getElementById('my-jobs-user');
+  if (userEl) userEl.textContent = user ? `(${user})` : '';
+
+  // Collect all jobs from all partitions, deduplicated by job ID, filtered to current user
+  const seen = new Set();
+  const allJobs = [];
+  for (const p of SNAPSHOT.partitions) {
+    for (const j of (p.jobs || [])) {
+      if (seen.has(j.id)) continue;
+      if (j.user !== user) continue;
+      seen.add(j.id);
+      allJobs.push(j);
+    }
+  }
+
+  const panel = document.getElementById('user-jobs-panel');
+  if (!allJobs.length) {
+    panel.innerHTML = '<p class="muted" style="font-size:13px;margin:4px 0">No jobs in queue.</p>';
+    return;
+  }
+
+  // Sort: running/completing first, then pending, then others
+  const stateRank = j => j.state === 'RUNNING' || j.state === 'COMPLETING' ? 0
+                       : j.state === 'PENDING' ? 1 : 2;
+  allJobs.sort((a, b) => stateRank(a) - stateRank(b));
+
+  const nRun  = allJobs.filter(j => j.state === 'RUNNING' || j.state === 'COMPLETING').length;
+  const nPend = allJobs.filter(j => j.state === 'PENDING').length;
+  const nOth  = allJobs.length - nRun - nPend;
+
+  const rows = allJobs.map(j => {
+    const gres = j.gres || '—';
+    const cls  = j.state === 'RUNNING' || j.state === 'COMPLETING' ? 'uj-running'
+               : j.state === 'PENDING' ? 'uj-pending' : 'uj-other';
+    const part = j.partition || '—';
+    return `<tr>
+      <td><a href="/job/${j.id}" style="color:var(--accent);border-bottom:1px dotted var(--accent)">${j.id}</a></td>
+      <td style="max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${j.name}">${j.name}</td>
+      <td><span class="${cls}">${j.state}</span></td>
+      <td class="muted">${part}</td>
+      <td>${j.cpus}</td>
+      <td class="muted">${gres}</td>
+      <td class="muted">${j.time}</td>
+    </tr>`;
+  }).join('');
+
+  panel.innerHTML = `
+    <div style="font-size:12px;color:var(--muted);margin-bottom:8px">
+      <span style="color:var(--good)">${nRun}</span> running &nbsp;·&nbsp;
+      <span style="color:var(--warn)">${nPend}</span> pending
+      ${nOth ? `&nbsp;·&nbsp; ${nOth} other` : ''}
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr>
+          <th class="no-sort">ID</th><th class="no-sort">Name</th><th class="no-sort">State</th>
+          <th class="no-sort">Part.</th><th class="no-sort">CPU</th>
+          <th class="no-sort">GPU</th><th class="no-sort">Time</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
 // ── init ───────────────────────────────────────────────────────────────────
 renderSummary(SNAPSHOT.summary);
 renderGpuTable(SNAPSHOT.summary.gpu_by_type);
@@ -986,6 +1089,7 @@ wirePartHeaders();
 document.getElementById('vram-min').addEventListener('input',  renderPartitions);
 document.getElementById('idle-only').addEventListener('change', renderPartitions);
 renderPartitions();
+renderUserJobs();
 </script>
 </body>
 </html>
