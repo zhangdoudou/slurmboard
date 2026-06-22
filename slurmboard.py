@@ -555,7 +555,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   /* three-column layout */
   .three-col { display: grid; grid-template-columns: 280px 1fr 300px; gap: 24px; align-items: start; }
-  .left-col, .center-col, .right-col { min-width: 0; }
+  .left-col, .center-col, .right-col { min-width: 0; overflow-x: auto; }
   .left-col h2:first-child, .center-col h2:first-child, .right-col h2:first-child { margin-top: 0; }
 
   /* compact tables in left/right sidebars */
