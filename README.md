@@ -2,23 +2,29 @@
 
 A lightweight, dependency-free web dashboard for Slurm clusters.
 
-Deploy directly on the Slurm login node — no SSH tunneling, no extra packages, just Python 3 stdlib. Reload the page to get a fresh snapshot; no background polling.
+Deploy directly on the Slurm login node — no SSH tunneling, no extra packages, just Python 3 stdlib.
+
+![slurmboard screenshot](assets/screenshot.png)
 
 ## Features
 
-- **Cluster summary** — nodes, CPUs, memory, GPUs (alloc vs idle)
-- **GPU breakdown by type** — v100 / a100 / h100 / h200 / b300 …
-- **Partition table** with:
-  - Multi-column sort (click = primary, Shift+click = secondary) — e.g. sort by VRAM ↓ then idle GPUs ↓
+- **Three-column layout** — cluster summary, partition table, and personal job history side by side; columns are draggable to resize
+- **Cluster summary** — idle/total for nodes, CPUs, memory, GPUs with green progress bars (green = more idle = better)
+- **GPU breakdown by type** — H100 / A100 / V100 / … with idle% bars
+- **Partition table**
+  - Multi-column sort (click header = primary, Shift+click = secondary)
   - Filter by minimum VRAM and/or "idle GPUs only"
-  - Running / pending job counts per partition
-  - Click any row to expand its nodes inline
-- **Per-node detail** inside each partition — state, CPU, memory, GPU idle/total, VRAM, load
+  - Per-partition async refresh (↻) without losing expand/sort state
+  - Running / pending job counts per partition; click to expand inline job list
+  - Click any row to expand node details (CPU, memory, GPU idle/total, VRAM, load)
+- **Job detail page** at `/job/<id>` — full `scontrol` info, linked from job lists
+- **My Jobs panel** — persistent job history (`jobs_history.json`), marks finished jobs as DONE; sortable by state / ID / time / date; shows submit time
+- **All progress bars show idle ratio** — green bar = available resources
 
 ## Requirements
 
-- Python ≥ 3.7 (stdlib only, no pip installs)
-- Running on a node with `sinfo`, `scontrol`, `squeue` in `$PATH` (i.e. a Slurm login or submit node)
+- Python ≥ 3.7 (stdlib only — no pip installs)
+- Running on a node with `sinfo`, `scontrol`, `squeue` in `$PATH` (Slurm login or submit node)
 
 ## Usage
 
@@ -30,26 +36,29 @@ Deploy directly on the Slurm login node — no SSH tunneling, no extra packages,
 ./slurmboard.py --port 9000 --host 127.0.0.1
 ```
 
-Then open `http://<login-node>:8000` in your browser. Reload the page to refresh the data.
+Open `http://<login-node>:8000` in your browser. Use the ↻ buttons to refresh data without a full page reload.
 
 ## How it works
 
-Each page load shells out to:
+Each request shells out to:
 
 ```
-scontrol -o show node   # per-node CPU / memory / GPU (gres) state
-sinfo -h -o "%P|%a|%l"  # partition availability and time limits
-squeue -h -o "%P|%T"    # running / pending job counts per partition
+scontrol -o show node        # per-node CPU / memory / GPU (gres) state
+sinfo -h -o "%P|%a|%l"      # partition availability and time limits
+squeue -h -o "%P|%i|..."    # job counts, states, submit times per partition
 ```
 
-The results are parsed with regex, serialised as JSON, and embedded directly into the returned HTML. The frontend is vanilla JS — no framework, no build step.
+Results are parsed, serialised as JSON, and embedded into the HTML. The `/data` endpoint returns fresh JSON for async partial refresh. Frontend is vanilla JS — no framework, no build step.
+
+Job history is persisted to `jobs_history.json` (same directory as the script, gitignored) so completed jobs remain visible in My Jobs for 7 days.
 
 ## Typical workflow
 
 1. You need N GPUs with at least X GB VRAM.
-2. Open slurmboard and sort partitions by **VRAM ↓** then **GPU idle ↓**.
-3. Check the **Jobs (run/pend)** column to gauge queue pressure.
-4. Click the best partition to expand its nodes and pick the least loaded one.
+2. Open slurmboard, filter by **Min VRAM**, sort by **GPU (idle/total) ↓**.
+3. Check **Jobs (run/pend)** to gauge queue pressure.
+4. Click a partition row to expand its nodes and pick the least loaded one.
+5. Monitor your submitted jobs in the **My Jobs** panel on the right.
 
 ## Inspiration
 
