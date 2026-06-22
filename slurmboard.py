@@ -520,6 +520,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   }
   .th-refresh:hover, .row-refresh:hover { color: var(--accent); }
   .th-refresh.loading, .row-refresh.loading { color: var(--accent); opacity: 0.5; pointer-events: none; }
+  .job-num { display:inline-block; min-width:3ch; text-align:right; font-variant-numeric:tabular-nums; }
 
   /* inner node sub-table */
   .nodes-expand-row > td { padding: 0 0 0 36px; background: var(--bg) !important; }
@@ -903,10 +904,10 @@ function renderPartitions() {
 
     const runSpan  = `<span class="job-toggle" data-kind="running"
       style="color:var(--good);cursor:pointer;border-bottom:1px dotted var(--good)"
-      >${p.jobs_running} run</span>`;
+      ><span class="job-num">${p.jobs_running}</span> run</span>`;
     const pendSpan = `<span class="job-toggle" data-kind="pending"
       style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)"
-      >${p.jobs_pending} pend</span>`;
+      ><span class="job-num">${p.jobs_pending}</span> pend</span>`;
 
     const isRefreshing = refreshingParts.has(p.name) || refreshingParts.has('*');
     const rowRefreshHtml = isRefreshing
@@ -921,7 +922,7 @@ function renderPartitions() {
       <td>${p.avail}</td>
       <td>${p.timelimit}</td>
       <td>${p.nodes}</td>
-      <td>${runSpan}<span class="muted"> · </span>${pendSpan}</td>
+      <td style="white-space:nowrap">${runSpan}<span class="muted"> · </span>${pendSpan}</td>
       <td>${minibar(cpuP)}${p.cpu_alloc} / ${p.cpu_total}</td>
       <td>${vramCell}</td>
       <td>${gpuCell}</td>`;
