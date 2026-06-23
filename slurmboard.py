@@ -15,12 +15,15 @@ Usage:
 import argparse
 import html as _html
 import json
+import logging
 import os
 import re
 import subprocess
 import getpass
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+log = logging.getLogger("slurmboard")
 
 # ---------------------------------------------------------------------------
 # Data collection
@@ -48,8 +51,11 @@ _TRES_GPU_TYPED_RE  = re.compile(r"gres/gpu:([a-zA-Z0-9_]+)=(\d+)")
 
 
 def _run(cmd):
+    log.debug("slurm: %s", " ".join(cmd))
+    t0 = time.monotonic()
     out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                          text=True, check=True)
+    log.debug("slurm: %s done in %.2fs", cmd[0], time.monotonic() - t0)
     return out.stdout
 
 
@@ -228,10 +234,15 @@ def collect_user_jobs(current_user, days=7):
             "done":      state not in _ACTIVE_STATES,
         })
     jobs.sort(key=lambda j: j["submit"], reverse=True)
+    if not jobs:
+        log.warning("sacct returned no jobs for user %s", current_user)
+    else:
+        log.debug("sacct: %d jobs for %s", len(jobs), current_user)
     return jobs
 
 
 def build_snapshot():
+    t0 = time.monotonic()
     nodes = collect_nodes()
     part_meta = collect_partitions()
     job_counts = collect_job_counts()
@@ -292,8 +303,7 @@ def build_snapshot():
         partitions.append(agg)
 
     current_user = getpass.getuser()
-
-    return {
+    snap = {
         "generated_at":    time.strftime("%Y-%m-%d %H:%M:%S"),
         "current_user":    current_user,
         "user_jobs":       collect_user_jobs(current_user),
@@ -301,6 +311,9 @@ def build_snapshot():
         "partitions":      partitions,
         "nodes":           nodes,
     }
+    log.info("snapshot built in %.2fs — %d nodes, %d partitions",
+             time.monotonic() - t0, len(nodes), len(partitions))
+    return snap
 
 
 # ---------------------------------------------------------------------------
@@ -1313,9 +1326,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/data":
             try:
                 body = json.dumps(build_snapshot()).encode("utf-8")
+                status = 200
             except Exception as exc:
+                log.error("build_snapshot failed: %s", exc, exc_info=True)
                 body = json.dumps({"error": str(exc)}).encode("utf-8")
-            self.send_response(200)
+                status = 500
+            self.send_response(status)
             self.send_header("Content-Type",   "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control",  "no-store")
@@ -1329,24 +1345,32 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
-    def log_message(self, *_):
-        pass
+    def log_message(self, fmt, *args):
+        log.debug("http: %s %s", self.address_string(), fmt % args)
 
 
 def main():
     ap = argparse.ArgumentParser(
         description="Tiny Slurm cluster dashboard (run on the login node).")
-    ap.add_argument("--host",     default="0.0.0.0", help="bind address  (default: 0.0.0.0)")
-    ap.add_argument("--port",     type=int, default=8000, help="bind port (default: 8000)")
+    ap.add_argument("--host",      default="0.0.0.0",  help="bind address (default: 0.0.0.0)")
+    ap.add_argument("--port",      type=int, default=8000, help="bind port (default: 8000)")
+    ap.add_argument("--log-level", default="info",
+                    choices=["debug", "info", "warning", "error"],
+                    help="log verbosity (default: info)")
     args = ap.parse_args()
 
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper()),
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"slurmboard listening on http://{args.host}:{args.port}"
-          f"  (runs sinfo/scontrol fresh on every page load)")
+    log.info("slurmboard listening on http://%s:%d", args.host, args.port)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        pass
+        log.info("shutting down")
     finally:
         httpd.server_close()
 
