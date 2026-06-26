@@ -136,43 +136,29 @@ def collect_nodes():
     return nodes
 
 
-def collect_partitions():
-    text = _run(["sinfo", "-h", "-o", "%P|%a|%l"])
-    info = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("|")
-        if len(parts) < 3:
-            continue
-        name = parts[0].rstrip("*")
-        if name not in info:
-            info[name] = {"avail": parts[1], "timelimit": parts[2]}
-    return info
-
-
 def collect_job_counts():
-    """Return {partition: {running, pending, jobs: [...]}} from squeue."""
+    """Return {partition: {running, pending, timelimit, jobs: [...]}} from squeue."""
     # %P partition  %i jobid  %u user  %j name  %T state
-    # %M elapsed/queue time  %C cpus  %b gres  %R reason/nodelist  %V submit time
-    text = _run(["squeue", "-h", "-o", "%P|%i|%u|%j|%T|%M|%C|%b|%R|%V"])
+    # %M elapsed  %C cpus  %b gres  %R reason  %l timelimit  %V submit time
+    text = _run(["squeue", "-h", "-o", "%P|%i|%u|%j|%T|%M|%C|%b|%R|%l|%V"])
     counts = {}
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
-        parts = line.split("|", 9)  # maxsplit keeps %V intact
-        if len(parts) < 9:
+        parts = line.split("|", 10)
+        if len(parts) < 10:
             continue
-        part, jid, user, name, state, time_used, cpus, gres, reason = parts[:9]
-        submit = parts[9] if len(parts) > 9 else None
+        part, jid, user, name, state, time_used, cpus, gres, reason, timelimit = parts[:10]
+        submit = parts[10] if len(parts) > 10 else None
         state_up = state.upper()
-        c = counts.setdefault(part, {"running": 0, "pending": 0, "jobs": []})
+        c = counts.setdefault(part, {"running": 0, "pending": 0, "timelimit": None, "jobs": []})
         if state_up == "RUNNING":
             c["running"] += 1
         elif state_up == "PENDING":
             c["pending"] += 1
+        if timelimit and timelimit not in ("", "INVALID", "NOT_SET"):
+            c["timelimit"] = timelimit  # last seen; partition jobs share the same limit
         c["jobs"].append({
             "id":        jid,
             "user":      user,
@@ -186,6 +172,9 @@ def collect_job_counts():
             "submit":    submit,
         })
     return counts
+
+
+_DOWN_STATES = {"DOWN", "DRAIN", "DRAINING", "DRAINED", "FAIL", "FAILING", "ERROR", "UNKNOWN"}
 
 
 _ACTIVE_STATES = {'RUNNING', 'PENDING', 'COMPLETING', 'RESIZING', 'SUSPENDED', 'REQUEUED'}
@@ -241,22 +230,22 @@ def collect_user_jobs(current_user, days=7):
     return jobs
 
 
-def build_snapshot():
+def build_cluster_snapshot():
+    """Cluster state only: scontrol show node + squeue (no sacct)."""
     t0 = time.monotonic()
     nodes = collect_nodes()
-    part_meta = collect_partitions()
     job_counts = collect_job_counts()
 
     summary = {
-        "cpu_alloc":   sum(n["cpu_alloc"]    for n in nodes),
-        "cpu_total":   sum(n["cpu_total"]    for n in nodes),
+        "cpu_alloc":    sum(n["cpu_alloc"]    for n in nodes),
+        "cpu_total":    sum(n["cpu_total"]    for n in nodes),
         "mem_alloc_mb": sum(n["mem_alloc_mb"] for n in nodes),
         "mem_total_mb": sum(n["mem_total_mb"] for n in nodes),
-        "gpu_alloc":   sum(n["gpu_alloc"]    for n in nodes),
-        "gpu_total":   sum(n["gpu_total"]    for n in nodes),
-        "node_count":  len(nodes),
-        "node_states": {},
-        "gpu_by_type": {},
+        "gpu_alloc":    sum(n["gpu_alloc"]    for n in nodes),
+        "gpu_total":    sum(n["gpu_total"]    for n in nodes),
+        "node_count":   len(nodes),
+        "node_states":  {},
+        "gpu_by_type":  {},
     }
     for n in nodes:
         st = n["state"]
@@ -290,29 +279,35 @@ def build_snapshot():
 
     partitions = []
     for name, agg in sorted(part_agg.items()):
-        meta = part_meta.get(name, {})
-        jc   = job_counts.get(name, {"running": 0, "pending": 0, "jobs": []})
-        agg["avail"]        = meta.get("avail",    "?")
-        agg["timelimit"]    = meta.get("timelimit", "?")
+        jc = job_counts.get(name, {"running": 0, "pending": 0, "timelimit": None, "jobs": []})
+        node_states = agg.get("states", {})
+        has_live = any(s.rstrip("*+~").upper() not in _DOWN_STATES for s in node_states)
+        agg["avail"]        = "up" if has_live else "down"
+        agg["timelimit"]    = jc["timelimit"] or "—"
         agg["gpu_idle"]     = agg["gpu_total"] - agg["gpu_alloc"]
         agg["jobs_running"] = jc["running"]
         agg["jobs_pending"] = jc["pending"]
         agg["jobs"]         = jc["jobs"]
         vram_vals = agg.pop("_vram_vals")
-        agg["gpu_vram_gb"] = max(vram_vals) if vram_vals else None
+        agg["gpu_vram_gb"]  = max(vram_vals) if vram_vals else None
         partitions.append(agg)
 
-    current_user = getpass.getuser()
-    snap = {
-        "generated_at":    time.strftime("%Y-%m-%d %H:%M:%S"),
-        "current_user":    current_user,
-        "user_jobs":       collect_user_jobs(current_user),
-        "summary":         summary,
-        "partitions":      partitions,
-        "nodes":           nodes,
-    }
-    log.info("snapshot built in %.2fs — %d nodes, %d partitions",
+    log.info("cluster snapshot in %.2fs — %d nodes, %d partitions",
              time.monotonic() - t0, len(nodes), len(partitions))
+    return {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "summary":      summary,
+        "partitions":   partitions,
+        "nodes":        nodes,
+    }
+
+
+def build_snapshot():
+    """Full snapshot for initial page load: cluster + user jobs."""
+    current_user = getpass.getuser()
+    snap = build_cluster_snapshot()
+    snap["current_user"] = current_user
+    snap["user_jobs"]    = collect_user_jobs(current_user)
     return snap
 
 
@@ -745,7 +740,7 @@ async function refreshData(partName) {
   refreshingParts.add(key);
   const hdrBtn = document.getElementById('part-th-refresh');
   if (hdrBtn) hdrBtn.classList.add('loading');
-  renderPartitions();
+  if (partName) renderPartitions(); // show spinner on that row only
 
   try {
     const resp = await fetch('/data');
@@ -754,7 +749,7 @@ async function refreshData(partName) {
     if (newSnap.error) throw new Error(newSnap.error);
 
     if (partName) {
-      // Patch only this partition's entry and its nodes
+      // Patch SNAPSHOT data for this partition and its nodes
       const newPart = newSnap.partitions.find(p => p.name === partName);
       if (newPart) {
         const idx = SNAPSHOT.partitions.findIndex(p => p.name === partName);
@@ -766,14 +761,18 @@ async function refreshData(partName) {
         const i = SNAPSHOT.nodes.findIndex(sn => sn.name === n.name);
         if (i >= 0) SNAPSHOT.nodes[i] = n; else SNAPSHOT.nodes.push(n);
       });
+      // Update only this row in-place — no re-sort, no other rows change
+      patchPartRow(partName);
     } else {
-      // Full snapshot replace — keep expand/sort state (those live outside SNAPSHOT)
-      SNAPSHOT = newSnap;
+      // Full cluster refresh
+      const preserved = SNAPSHOT.user_jobs;
+      SNAPSHOT = {...newSnap, user_jobs: preserved};
       const meta = document.getElementById('snap-meta');
       if (meta) meta.textContent =
         `snapshot taken at ${newSnap.generated_at} · reload the page to refresh`;
       renderSummary(SNAPSHOT.summary);
       renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+      renderPartitions();
     }
   } catch(e) {
     console.error('slurmboard refresh failed:', e);
@@ -781,8 +780,27 @@ async function refreshData(partName) {
 
   refreshingParts.delete(key);
   if (hdrBtn) hdrBtn.classList.remove('loading');
-  renderPartitions();
-  renderUserJobs();
+  if (partName) {
+    patchPartRow(partName);  // also resets the ↻ spinner on that row
+  } else {
+    renderUserJobs();
+  }
+}
+
+async function refreshUserJobs() {
+  const btn = document.getElementById('uj-refresh-btn');
+  if (btn) btn.classList.add('loading');
+  try {
+    const resp = await fetch('/data/userjobs');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    SNAPSHOT.user_jobs = data.user_jobs;
+    renderUserJobs();
+  } catch(e) {
+    console.error('userjobs refresh failed:', e);
+  }
+  if (btn) btn.classList.remove('loading');
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -1001,6 +1019,97 @@ function buildJobSubTable(jobs, isPending) {
 }
 
 // ── render partition table ──────────────────────────────────────────────────
+function buildPartCells(p) {
+  const cpuIdleP = pct(p.cpu_total - p.cpu_alloc, p.cpu_total);
+  const idleP    = pct(p.gpu_idle, p.gpu_total);
+  const gpuCell  = p.gpu_total
+    ? minibar(idleP, 'gpu') + `${p.gpu_idle} / ${p.gpu_total}`
+    : '<span class="muted">—</span>';
+  const vramCell = p.gpu_vram_gb != null
+    ? `<b>${p.gpu_vram_gb}</b> GB`
+    : '<span class="muted">—</span>';
+  const runSpan  = `<span class="job-toggle" data-kind="running"
+    style="color:var(--good);cursor:pointer;border-bottom:1px dotted var(--good)"
+    ><span class="job-num">${p.jobs_running}</span> run</span>`;
+  const pendSpan = `<span class="job-toggle" data-kind="pending"
+    style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)"
+    ><span class="job-num">${p.jobs_pending}</span> pend</span>`;
+  return `
+    <td><b class="part-name-link">${p.name}</b></td>
+    <td>${p.avail}</td>
+    <td>${p.timelimit}</td>
+    <td>${p.nodes}</td>
+    <td style="white-space:nowrap">${runSpan}<span class="muted"> · </span>${pendSpan}</td>
+    <td>${minibar(cpuIdleP, 'gpu')}${p.cpu_total - p.cpu_alloc} / ${p.cpu_total}</td>
+    <td>${vramCell}</td>
+    <td>${gpuCell}</td>`;
+}
+
+function patchPartRow(partName) {
+  const p = SNAPSHOT.partitions.find(p => p.name === partName);
+  if (!p) return;
+  const tr = document.querySelector(`tr.part-row[data-part="${partName}"]`);
+  if (!tr) return;
+  const cur = expandState[partName];
+
+  // Update toggle-cell: reset ↻ spinner
+  const isRefreshing = refreshingParts.has(partName) || refreshingParts.has('*');
+  const refreshHtml = isRefreshing
+    ? '<span class="row-refresh loading" title="Refreshing…">&#x21bb;</span>'
+    : `<span class="row-refresh" data-part="${partName}" title="Refresh partition">&#x21bb;</span>`;
+  const toggleCell = tr.querySelector('.toggle-cell');
+  if (toggleCell) {
+    toggleCell.innerHTML = `${cur ? '▼' : '▶'} ${refreshHtml}`;
+    toggleCell.addEventListener('click', () => {
+      if (expandState[partName]) delete expandState[partName];
+      else expandState[partName] = 'nodes';
+      renderPartitions();
+    });
+    const rowBtn = toggleCell.querySelector('.row-refresh[data-part]');
+    if (rowBtn) rowBtn.addEventListener('click', (e) => {
+      e.stopPropagation(); refreshData(partName);
+    });
+  }
+
+  // Replace data cells (all tds after the toggle-cell)
+  const tds = tr.querySelectorAll('td');
+  const tmp = document.createElement('tr');
+  tmp.innerHTML = buildPartCells(p);
+  const newTds = tmp.querySelectorAll('td');
+  for (let i = 0; i < newTds.length; i++) {
+    if (tds[i + 1]) tds[i + 1].replaceWith(newTds[i]);
+  }
+
+  // Re-wire clicks on newly inserted cells
+  tr.querySelectorAll('.job-toggle').forEach(span => {
+    span.addEventListener('click', () => {
+      const kind = span.dataset.kind;
+      if (expandState[partName] === kind) delete expandState[partName];
+      else expandState[partName] = kind;
+      renderPartitions();
+    });
+  });
+  tr.querySelector('.part-name-link').addEventListener('click', () => {
+    if (expandState[partName] === 'nodes') delete expandState[partName];
+    else expandState[partName] = 'nodes';
+    renderPartitions();
+  });
+
+  // If expand panel is open, refresh its content too
+  const expandTr = tr.nextElementSibling;
+  if (expandTr && expandTr.classList.contains('nodes-expand-row') && cur) {
+    const td = expandTr.querySelector('td');
+    if (td) {
+      if (cur === 'nodes') {
+        td.innerHTML = buildNodeSubTable(partName);
+      } else {
+        const jobs = (p.jobs || []).filter(j => j.state === cur.toUpperCase());
+        td.innerHTML = buildJobSubTable(jobs, cur === 'pending');
+      }
+    }
+  }
+}
+
 function renderPartitions() {
   const vramMin  = parseInt(document.getElementById('vram-min').value) || 0;
   const idleOnly = document.getElementById('idle-only').checked;
@@ -1024,22 +1133,7 @@ function renderPartitions() {
   tbody.innerHTML = '';
 
   for (const p of visible) {
-    const cur       = expandState[p.name];   // "nodes"|"running"|"pending"|undefined
-    const cpuIdleP  = pct(p.cpu_total - p.cpu_alloc, p.cpu_total);
-    const idleP     = pct(p.gpu_idle,  p.gpu_total);
-    const gpuCell = p.gpu_total
-      ? minibar(idleP, 'gpu') + `${p.gpu_idle} / ${p.gpu_total}`
-      : '<span class="muted">—</span>';
-    const vramCell = p.gpu_vram_gb != null
-      ? `<b>${p.gpu_vram_gb}</b> GB`
-      : '<span class="muted">—</span>';
-
-    const runSpan  = `<span class="job-toggle" data-kind="running"
-      style="color:var(--good);cursor:pointer;border-bottom:1px dotted var(--good)"
-      ><span class="job-num">${p.jobs_running}</span> run</span>`;
-    const pendSpan = `<span class="job-toggle" data-kind="pending"
-      style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)"
-      ><span class="job-num">${p.jobs_pending}</span> pend</span>`;
+    const cur = expandState[p.name];   // "nodes"|"running"|"pending"|undefined
 
     const isRefreshing = refreshingParts.has(p.name) || refreshingParts.has('*');
     const rowRefreshHtml = isRefreshing
@@ -1048,16 +1142,9 @@ function renderPartitions() {
 
     const tr = document.createElement('tr');
     tr.className = 'part-row';
-    tr.innerHTML = `
-      <td class="toggle-cell">${cur ? '▼' : '▶'} ${rowRefreshHtml}</td>
-      <td><b class="part-name-link">${p.name}</b></td>
-      <td>${p.avail}</td>
-      <td>${p.timelimit}</td>
-      <td>${p.nodes}</td>
-      <td style="white-space:nowrap">${runSpan}<span class="muted"> · </span>${pendSpan}</td>
-      <td>${minibar(cpuIdleP, 'gpu')}${p.cpu_total - p.cpu_alloc} / ${p.cpu_total}</td>
-      <td>${vramCell}</td>
-      <td>${gpuCell}</td>`;
+    tr.dataset.part = p.name;
+    tr.innerHTML = `<td class="toggle-cell">${cur ? '▼' : '▶'} ${rowRefreshHtml}</td>`
+                 + buildPartCells(p);
 
     // row refresh button
     const rowRefreshBtn = tr.querySelector('.row-refresh[data-part]');
@@ -1264,7 +1351,7 @@ wirePartHeaders();
 document.getElementById('vram-min').addEventListener('input',  renderPartitions);
 document.getElementById('idle-only').addEventListener('change', renderPartitions);
 initColumnResizers();
-document.getElementById('uj-refresh-btn').addEventListener('click', () => refreshData());
+document.getElementById('uj-refresh-btn').addEventListener('click', () => refreshUserJobs());
 renderPartitions();
 renderUserJobs();
 </script>
@@ -1325,11 +1412,26 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path == "/data":
             try:
-                body = json.dumps(build_snapshot()).encode("utf-8")
+                body   = json.dumps(build_cluster_snapshot()).encode("utf-8")
                 status = 200
             except Exception as exc:
-                log.error("build_snapshot failed: %s", exc, exc_info=True)
-                body = json.dumps({"error": str(exc)}).encode("utf-8")
+                log.error("build_cluster_snapshot failed: %s", exc, exc_info=True)
+                body   = json.dumps({"error": str(exc)}).encode("utf-8")
+                status = 500
+            self.send_response(status)
+            self.send_header("Content-Type",   "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control",  "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/data/userjobs":
+            try:
+                jobs   = collect_user_jobs(getpass.getuser())
+                body   = json.dumps({"user_jobs": jobs}).encode("utf-8")
+                status = 200
+            except Exception as exc:
+                log.error("collect_user_jobs failed: %s", exc, exc_info=True)
+                body   = json.dumps({"error": str(exc)}).encode("utf-8")
                 status = 500
             self.send_response(status)
             self.send_header("Content-Type",   "application/json; charset=utf-8")
