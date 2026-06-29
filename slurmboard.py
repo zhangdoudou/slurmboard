@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3.11
 """
 slurmboard - a tiny, dependency-free web dashboard for a Slurm cluster.
 
@@ -82,14 +82,45 @@ def _gpu_alloc_from_tres(tres, gpu_type):
     return int(m.group(1)) if m else 0
 
 
+_GPU_VRAM_GB = {
+    "a100":  80,
+    "a100-80":  80,
+    "a100-40":  40,
+    "a40":   48,
+    "a30":   24,
+    "a10":   24,
+    "v100":  32,
+    "v100-32": 32,
+    "v100-16": 16,
+    "mi300x": 192,
+    "mi300a": 128,
+    "mi250x": 128,
+    "mi250":  128,
+    "mi210":  64,
+    "mi100":  32,
+    "h100":  80,
+    "h200": 141,
+}
+
 def _vram_gb_from_gres(gres):
     if not gres:
         return None
+    # prefer explicit min-vram annotation if present
     m = _GRES_VRAM_RE.search(gres)
-    if not m:
-        return None
-    val, unit = int(m.group(1)), m.group(2)
-    return val if unit == "G" else val // 1024
+    if m:
+        val, unit = int(m.group(1)), m.group(2)
+        return val if unit == "G" else val // 1024
+    # fall back to GPU model lookup
+    m = _GRES_GPU_RE.search(gres)
+    if m:
+        model = m.group(1).lower()
+        if model in _GPU_VRAM_GB:
+            return _GPU_VRAM_GB[model]
+        # try prefix match (e.g. "mi250x" matches "mi250")
+        for key, vram in _GPU_VRAM_GB.items():
+            if model.startswith(key) or key.startswith(model):
+                return vram
+    return None
 
 
 def collect_nodes():
@@ -134,6 +165,19 @@ def collect_nodes():
             "gpu_vram_gb": _vram_gb_from_gres(gres),
         })
     return nodes
+
+
+def collect_partition_limits():
+    """Return {partition: timelimit_str} from sinfo."""
+    text = _run(["sinfo", "-h", "-o", "%P|%l"])
+    limits = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        part, tl = line.split("|", 1)
+        limits[part.rstrip("*")] = tl
+    return limits
 
 
 def collect_job_counts():
@@ -235,6 +279,7 @@ def build_cluster_snapshot():
     t0 = time.monotonic()
     nodes = collect_nodes()
     job_counts = collect_job_counts()
+    part_limits = collect_partition_limits()
 
     summary = {
         "cpu_alloc":    sum(n["cpu_alloc"]    for n in nodes),
@@ -252,10 +297,15 @@ def build_cluster_snapshot():
         summary["node_states"][st] = summary["node_states"].get(st, 0) + 1
         if n["gpu_total"]:
             t = n["gpu_type"] or "gpu"
-            b = summary["gpu_by_type"].setdefault(t, {"alloc": 0, "total": 0, "nodes": 0})
+            b = summary["gpu_by_type"].setdefault(t, {"alloc": 0, "total": 0, "nodes": 0, "partitions": {}})
             b["alloc"] += n["gpu_alloc"]
             b["total"] += n["gpu_total"]
             b["nodes"] += 1
+            for p in n["partitions"]:
+                if p:
+                    pb = b["partitions"].setdefault(p, {"alloc": 0, "total": 0})
+                    pb["alloc"] += n["gpu_alloc"]
+                    pb["total"] += n["gpu_total"]
 
     part_agg = {}
     for n in nodes:
@@ -283,7 +333,7 @@ def build_cluster_snapshot():
         node_states = agg.get("states", {})
         has_live = any(s.rstrip("*+~").upper() not in _DOWN_STATES for s in node_states)
         agg["avail"]        = "up" if has_live else "down"
-        agg["timelimit"]    = jc["timelimit"] or "—"
+        agg["timelimit"]    = part_limits.get(name) or "—"
         agg["gpu_idle"]     = agg["gpu_total"] - agg["gpu_alloc"]
         agg["jobs_running"] = jc["running"]
         agg["jobs_pending"] = jc["pending"]
@@ -610,6 +660,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .inner-table tr:last-child td { border-bottom: none; }
   .inner-table tr:hover td { background: rgba(255,255,255,.025); }
 
+  .gpu-expand-row > td { padding: 0 0 0 36px; background: var(--bg) !important; }
+
   /* state pills */
   .pill { display: inline-block; padding: 2px 7px; border-radius: 999px; font-size: 11px;
           font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
@@ -676,6 +728,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       <h2>GPUs by type</h2>
       <table id="gpu-table">
         <thead><tr>
+          <th class="no-sort toggle-cell"></th>
           <th class="no-sort">Type</th>
           <th class="no-sort">Alloc</th>
           <th class="no-sort">Idle</th>
@@ -935,24 +988,72 @@ function renderSummary(s) {
 }
 
 // ── render GPU-by-type table ────────────────────────────────────────────────
+const gpuTypeExpanded = {};
+
+function buildGpuPartSubTable(partitions) {
+  const rows = Object.entries(partitions)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([pname, pv]) => {
+      const idlePct = pct(pv.total - pv.alloc, pv.total);
+      return `<tr>
+        <td><b>${pname}</b></td>
+        <td>${pv.alloc}</td>
+        <td>${pv.total - pv.alloc}</td>
+        <td>${pv.total}</td>
+        <td>${minibar(idlePct, 'gpu')}${idlePct}%</td>
+      </tr>`;
+    }).join('');
+  return `<div class="inner-wrap"><table class="inner-table">
+    <thead><tr>
+      <th>Partition</th><th>Alloc</th><th>Idle</th><th>Total</th><th>Idle%</th>
+    </tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="muted" style="padding:8px 10px">No partitions.</td></tr>'}</tbody>
+  </table></div>`;
+}
+
 function renderGpuTable(byType) {
   const tbody = document.querySelector('#gpu-table tbody');
   const entries = Object.entries(byType).sort((a,b) => b[1].total - a[1].total);
   if (!entries.length) {
-    tbody.innerHTML = '<tr><td colspan="6" class="muted">No GPUs detected.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="muted">No GPUs detected.</td></tr>';
     return;
   }
-  tbody.innerHTML = entries.map(([type, v]) => {
+  tbody.innerHTML = '';
+  for (const [type, v] of entries) {
     const idlePct = pct(v.total - v.alloc, v.total);
-    return `<tr>
-      <td><b>${type}</b></td>
+    const open = !!gpuTypeExpanded[type];
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="toggle-cell">${open ? '▼' : '▶'}</td>
+      <td><b class="part-name-link gpu-type-link">${type}</b></td>
       <td>${v.alloc}</td>
       <td>${v.total - v.alloc}</td>
       <td>${v.total}</td>
       <td>${minibar(idlePct, 'gpu')}${idlePct}%</td>
-      <td>${v.nodes}</td>
-    </tr>`;
-  }).join('');
+      <td>${v.nodes}</td>`;
+    tr.querySelector('.toggle-cell').addEventListener('click', () => {
+      if (gpuTypeExpanded[type]) delete gpuTypeExpanded[type];
+      else gpuTypeExpanded[type] = true;
+      renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+    });
+    tr.querySelector('.gpu-type-link').addEventListener('click', () => {
+      if (gpuTypeExpanded[type]) delete gpuTypeExpanded[type];
+      else gpuTypeExpanded[type] = true;
+      renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+    });
+    tbody.appendChild(tr);
+
+    if (open) {
+      const expandTr = document.createElement('tr');
+      expandTr.className = 'gpu-expand-row';
+      const td = document.createElement('td');
+      td.colSpan = 7;
+      td.innerHTML = buildGpuPartSubTable(v.partitions || {});
+      expandTr.appendChild(td);
+      tbody.appendChild(expandTr);
+    }
+  }
 }
 
 // ── node sub-table (inside expanded partition row) ──────────────────────────
