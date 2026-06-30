@@ -357,12 +357,37 @@ def build_cluster_snapshot():
     }
 
 
+def collect_active_queue(current_user):
+    """Return running/pending jobs for current user from squeue (fast)."""
+    text = _run(["squeue", "-u", current_user, "-h", "-o", "%i|%j|%T|%P|%M|%V|%C|%b"])
+    jobs = []
+    for line in text.splitlines():
+        parts = line.split("|", 7)
+        if len(parts) < 7:
+            continue
+        jid, name, state, partition, elapsed, submit, cpus = parts[:7]
+        gres = parts[7] if len(parts) > 7 else ""
+        jobs.append({
+            "id":        jid,
+            "name":      name,
+            "state":     state,
+            "partition": partition,
+            "time":      elapsed,
+            "submit":    submit,
+            "cpus":      cpus,
+            "gres":      gres or None,
+        })
+    log.debug("squeue: %d active jobs for %s", len(jobs), current_user)
+    return jobs
+
+
 def build_snapshot():
-    """Full snapshot for initial page load: cluster + user jobs."""
+    """Full snapshot for initial page load: cluster + active queue (no sacct)."""
     current_user = getpass.getuser()
     snap = build_cluster_snapshot()
     snap["current_user"] = current_user
-    snap["user_jobs"]    = collect_user_jobs(current_user)
+    snap["active_queue"] = collect_active_queue(current_user)
+    snap["user_jobs"]    = []   # loaded async via /data/userjobs
     return snap
 
 
@@ -585,8 +610,20 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   :root {
     --bg: #0f1115; --panel: #171a21; --border: #2a2f3a; --text: #e6e9ef;
     --muted: #8b93a3; --accent: #4f8cff; --good: #3ec97c; --warn: #f0a93f; --bad: #ef5b5b;
+    --sb-track: #1a1d24; --sb-thumb: #3a3f4d; --sb-thumb-hover: #4e5668;
+    --bar-track: #2a2f3a; --kbd-bg: #2a2f3a; --kbd-border: transparent;
   }
-  * { box-sizing: border-box; }
+  :root[data-theme="light"] {
+    --bg: #f4f5f7; --panel: #ffffff; --border: #dde1ea; --text: #1a1d23;
+    --muted: #6b7280; --accent: #2563eb; --good: #16a34a; --warn: #d97706; --bad: #dc2626;
+    --sb-track: #e4e7ed; --sb-thumb: #b0b7c3; --sb-thumb-hover: #8f98a8;
+    --bar-track: #d5d9e3; --kbd-bg: #eceef3; --kbd-border: #c8cdd8;
+  }
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--sb-thumb) var(--sb-track); }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--sb-track); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb { background: var(--sb-thumb); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--sb-thumb-hover); }
   body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
          background: var(--bg); color: var(--text); font-size: 14px;
          display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
@@ -597,6 +634,10 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   header .reload { margin-left: auto; background: var(--accent); color: #fff; border: none;
                    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer; }
   header .reload:hover { filter: brightness(1.1); }
+  header .theme-btn { background: transparent; border: 1px solid var(--border); color: var(--muted);
+                      border-radius: 6px; padding: 5px 10px; font-size: 14px; cursor: pointer;
+                      transition: color .15s, border-color .15s; }
+  header .theme-btn:hover { color: var(--text); border-color: var(--text); }
   main { flex: 1; min-height: 0; display: flex; flex-direction: column;
          padding: 12px 20px 0; overflow: hidden; }
   footer { flex-shrink: 0; text-align: center; color: var(--muted); font-size: 11px;
@@ -604,7 +645,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
        margin: 32px 0 12px; }
   .hint { font-size: 12px; color: var(--muted); margin: -8px 0 12px; }
-  .hint kbd { background: #2a2f3a; border-radius: 4px; padding: 1px 5px; font-size: 11px; }
+  .hint kbd { background: var(--kbd-bg); border: 1px solid var(--kbd-border);
+              border-radius: 4px; padding: 1px 5px; font-size: 11px; color: var(--text); }
 
   /* summary cards */
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
@@ -621,13 +663,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .left-col .card .bar { height: 5px; margin-top: 5px; }
 
   /* progress bars */
-  .bar { height: 8px; border-radius: 4px; background: #2a2f3a; margin-top: 10px; overflow: hidden; }
+  .bar { height: 8px; border-radius: 4px; background: var(--bar-track); margin-top: 10px; overflow: hidden; }
   .bar > span { display: block; height: 100%; background: var(--accent); }
   .bar.gpu > span  { background: var(--good); }
   .bar.high > span { background: var(--warn); }
   .bar.crit > span { background: var(--bad); }
-  .minibar { display: inline-block; width: 60px; height: 6px; border-radius: 3px;
-             background: #2a2f3a; vertical-align: middle; margin-right: 5px; overflow: hidden; }
+  .minibar { display: inline-block; width: 60px; height: 6px; border-radius: 3px; background: var(--bar-track);
+             vertical-align: middle; margin-right: 5px; overflow: hidden; }
   .minibar > span { display: block; height: 100%; background: var(--accent); }
   .minibar.gpu > span { background: var(--good); }
 
@@ -642,7 +684,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   th.no-sort { cursor: default; }
   th:not(.no-sort):hover { color: var(--text); }
   tr:last-child > td { border-bottom: none; }
-  tr:hover > td { background: rgba(255,255,255,.03); }
+  tr:hover > td { background: rgba(128,128,128,.05); }
 
   /* partition row */
   .toggle-cell { width: 52px; text-align: center; color: var(--muted); font-size: 11px; cursor: pointer; }
@@ -660,10 +702,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .nodes-expand-row > td { padding: 0 0 0 36px; background: var(--bg) !important; }
   .inner-wrap { border-left: 3px solid var(--border); margin: 6px 0 10px; }
   .inner-table { width: 100%; border-collapse: collapse; background: var(--bg); font-size: 13px; }
-  .inner-table th { background: rgba(79,140,255,.05); font-size: 11px; padding: 6px 10px; }
-  .inner-table td { padding: 6px 10px; border-bottom: 1px solid #1e2330; }
+  .inner-table th { background: color-mix(in srgb, var(--accent) 6%, transparent);
+                    font-size: 11px; padding: 6px 10px; }
+  .inner-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
   .inner-table tr:last-child td { border-bottom: none; }
-  .inner-table tr:hover td { background: rgba(255,255,255,.025); }
+  .inner-table tr:hover td { background: rgba(128,128,128,.06); }
 
   .gpu-expand-row > td { padding: 0 0 0 36px; background: var(--bg) !important; }
 
@@ -688,11 +731,20 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .three-col  { flex: 1; min-height: 0; display: flex; flex-direction: row; overflow: hidden; }
   .left-col   { width: 25%; min-width: 100px; flex-shrink: 0; overflow: auto; padding: 0 16px 20px 0; }
   .center-col { flex: 1; min-width: 0; overflow: auto; padding: 0 16px 20px; }
-  .right-col  { width: 25%; min-width: 180px; flex-shrink: 0; overflow: auto; padding: 0 0 20px 16px; }
+  .right-col  { width: 25%; min-width: 180px; flex-shrink: 0; padding: 0 0 0 16px;
+               display: flex; flex-direction: column; overflow: hidden; }
+  .jobs-section { display: flex; flex-direction: column; flex: 1; min-height: 0; padding-bottom: 12px; }
+  .jobs-section h3 { flex-shrink: 0; font-size: 13px; color: var(--muted); text-transform: uppercase;
+                     letter-spacing: .04em; margin: 14px 0 6px; font-weight: 600; }
+  .jobs-scroll { flex: 1; min-height: 0; overflow-y: auto; }
   .col-resizer { width: 4px; flex-shrink: 0; background: var(--border); cursor: col-resize;
                  user-select: none; position: relative; transition: background .15s; }
   .col-resizer:hover, .col-resizer.dragging { background: var(--accent); }
   .col-resizer::after { content: ''; position: absolute; inset: 0 -5px; }
+  .row-resizer { height: 4px; flex-shrink: 0; background: var(--border); cursor: row-resize;
+                 user-select: none; position: relative; transition: background .15s; }
+  .row-resizer:hover, .row-resizer.dragging { background: var(--accent); }
+  .row-resizer::after { content: ''; position: absolute; inset: -5px 0; }
   .left-col h2:first-child, .center-col h2:first-child, .right-col h2:first-child { margin-top: 0; }
 
   /* compact tables in left/right sidebars */
@@ -700,9 +752,9 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .left-col th, .left-col td { padding: 5px 8px; }
 
   /* user jobs table — same padding as partition table */
-  #uj-table th, #uj-table td { padding: 5px 7px; }
+  #aq-table th, #aq-table td, #hist-table th, #hist-table td { padding: 5px 7px; }
   .uj-id { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
-  .uj-id:hover { color: #fff; }
+  .uj-id:hover { color: var(--text); border-bottom-color: var(--text); }
   .uj-chip { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px;
              font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
   .uj-chip.running, .uj-chip.completing { background: rgba(62,201,124,.15); color: var(--good); }
@@ -721,6 +773,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <header>
   <h1>&#9881; Slurm Dashboard</h1>
   <div class="meta" id="snap-meta">snapshot taken at __GENERATED_AT__ &middot; reload the page to refresh</div>
+  <button class="theme-btn" id="theme-toggle" title="Toggle light/dark">🌙</button>
   <button class="reload" onclick="location.reload()">&#x21bb; Refresh</button>
 </header>
 <main>
@@ -733,13 +786,13 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       <h2>GPUs by type</h2>
       <table id="gpu-table">
         <thead><tr>
-          <th class="no-sort toggle-cell"></th>
-          <th class="no-sort">Type</th>
-          <th class="no-sort">Alloc</th>
-          <th class="no-sort">Idle</th>
-          <th class="no-sort">Total</th>
-          <th class="no-sort">Idle%</th>
-          <th class="no-sort">Nodes</th>
+          <th class="no-sort toggle-cell"><span id="gpu-th-toggle" title="Expand/collapse all">▶</span></th>
+          <th data-k="type"     data-label="Type">Type</th>
+          <th data-k="alloc"    data-label="Alloc">Alloc</th>
+          <th data-k="idle"     data-label="Idle">Idle</th>
+          <th data-k="total"    data-label="Total">Total</th>
+          <th data-k="idle_pct" data-label="Idle%">Idle%</th>
+          <th data-k="nodes"    data-label="Nodes">Nodes</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -778,8 +831,16 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     </section>
     <div class="col-resizer" id="resizer-right" title="Drag to resize"></div>
     <aside class="right-col">
-      <h2>My Jobs <span id="my-jobs-user" class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0"></span> <span id="uj-refresh-btn" class="th-refresh" title="Refresh">&#x21bb;</span></h2>
-      <div id="user-jobs-panel"></div>
+      <h2>My Jobs <span id="my-jobs-user" class="muted" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0"></span></h2>
+      <div class="jobs-section">
+        <h3>Active Queue <span id="aq-refresh-btn" class="th-refresh" title="Refresh">&#x21bb;</span></h3>
+        <div class="jobs-scroll" id="aq-panel"></div>
+      </div>
+      <div class="row-resizer" id="resizer-jobs" title="Drag to resize"></div>
+      <div class="jobs-section">
+        <h3>History <span id="hist-refresh-btn" class="th-refresh" title="Refresh">&#x21bb;</span> <span class="muted" style="font-size:11px;text-transform:none;letter-spacing:0">last 7 days</span></h3>
+        <div class="jobs-scroll" id="hist-panel"><p class="muted" style="font-size:13px;margin:4px 0">Loading…</p></div>
+      </div>
     </aside>
 
   </div>
@@ -823,8 +884,7 @@ async function refreshData(partName) {
       patchPartRow(partName);
     } else {
       // Full cluster refresh
-      const preserved = SNAPSHOT.user_jobs;
-      SNAPSHOT = {...newSnap, user_jobs: preserved};
+      SNAPSHOT = {...newSnap, active_queue: SNAPSHOT.active_queue, user_jobs: SNAPSHOT.user_jobs};
       const meta = document.getElementById('snap-meta');
       if (meta) meta.textContent =
         `snapshot taken at ${newSnap.generated_at} · reload the page to refresh`;
@@ -839,14 +899,28 @@ async function refreshData(partName) {
   refreshingParts.delete(key);
   if (hdrBtn) hdrBtn.classList.remove('loading');
   if (partName) {
-    patchPartRow(partName);  // also resets the ↻ spinner on that row
-  } else {
-    renderUserJobs();
+    patchPartRow(partName);
   }
 }
 
-async function refreshUserJobs() {
-  const btn = document.getElementById('uj-refresh-btn');
+async function refreshActiveQueue() {
+  const btn = document.getElementById('aq-refresh-btn');
+  if (btn) btn.classList.add('loading');
+  try {
+    const resp = await fetch('/data/activequeue');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    SNAPSHOT.active_queue = data.active_queue;
+    renderActiveQueue();
+  } catch(e) {
+    console.error('activequeue refresh failed:', e);
+  }
+  if (btn) btn.classList.remove('loading');
+}
+
+async function refreshHistoryJobs() {
+  const btn = document.getElementById('hist-refresh-btn');
   if (btn) btn.classList.add('loading');
   try {
     const resp = await fetch('/data/userjobs');
@@ -854,7 +928,7 @@ async function refreshUserJobs() {
     const data = await resp.json();
     if (data.error) throw new Error(data.error);
     SNAPSHOT.user_jobs = data.user_jobs;
-    renderUserJobs();
+    renderHistoryJobs();
   } catch(e) {
     console.error('userjobs refresh failed:', e);
   }
@@ -992,6 +1066,32 @@ function renderSummary(s) {
     </div>`;
 }
 
+// ── light / dark theme toggle ───────────────────────────────────────────────
+(function initTheme() {
+  const saved = localStorage.getItem('sb_theme');
+  if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('theme-toggle');
+    if (!btn) return;
+    const update = () => {
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      btn.textContent = isLight ? '🌙' : '☀️';
+    };
+    update();
+    btn.addEventListener('click', () => {
+      const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+      if (isLight) {
+        document.documentElement.removeAttribute('data-theme');
+        localStorage.setItem('sb_theme', 'dark');
+      } else {
+        document.documentElement.setAttribute('data-theme', 'light');
+        localStorage.setItem('sb_theme', 'light');
+      }
+      update();
+    });
+  });
+})();
+
 // ── render GPU-by-type table ────────────────────────────────────────────────
 const gpuTypeExpanded = {};
 
@@ -1016,15 +1116,57 @@ function buildGpuPartSubTable(partitions) {
   </table></div>`;
 }
 
+let gpuSortKey = 'total', gpuSortDir = -1;
+
+function updateGpuHeaders() {
+  document.querySelectorAll('#gpu-table th[data-k]').forEach(th => {
+    const key = th.dataset.k, label = th.dataset.label;
+    th.textContent = key === gpuSortKey
+      ? label + (gpuSortDir > 0 ? ' ↑' : ' ↓')
+      : label;
+  });
+  const toggle = document.getElementById('gpu-th-toggle');
+  if (toggle) {
+    const anyOpen = Object.keys(gpuTypeExpanded).length > 0;
+    toggle.textContent = anyOpen ? '▼' : '▶';
+  }
+}
+
+function wireGpuHeaders() {
+  document.querySelectorAll('#gpu-table th[data-k]').forEach(th =>
+    th.addEventListener('click', () => {
+      const key = th.dataset.k;
+      if (gpuSortKey === key) gpuSortDir *= -1;
+      else { gpuSortKey = key; gpuSortDir = -1; }
+      renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+    }));
+  document.getElementById('gpu-th-toggle').addEventListener('click', () => {
+    const types = Object.keys(SNAPSHOT.summary.gpu_by_type);
+    const anyOpen = types.some(t => gpuTypeExpanded[t]);
+    if (anyOpen) types.forEach(t => delete gpuTypeExpanded[t]);
+    else         types.forEach(t => { gpuTypeExpanded[t] = true; });
+    renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+  });
+}
+
 function renderGpuTable(byType) {
   const tbody = document.querySelector('#gpu-table tbody');
-  const entries = Object.entries(byType).sort((a,b) => b[1].total - a[1].total);
+  let entries = Object.entries(byType).map(([type, v]) => ({
+    type, v, idle: v.total - v.alloc, idle_pct: pct(v.total - v.alloc, v.total)
+  }));
+  entries.sort((a, b) => {
+    let av = a[gpuSortKey] ?? a.v[gpuSortKey];
+    let bv = b[gpuSortKey] ?? b.v[gpuSortKey];
+    if (typeof av === 'string') return gpuSortDir * av.localeCompare(bv);
+    return gpuSortDir * ((av ?? 0) - (bv ?? 0));
+  });
+  updateGpuHeaders();
   if (!entries.length) {
     tbody.innerHTML = '<tr><td colspan="7" class="muted">No GPUs detected.</td></tr>';
     return;
   }
   tbody.innerHTML = '';
-  for (const [type, v] of entries) {
+  for (const {type, v} of entries) {
     const idlePct = pct(v.total - v.alloc, v.total);
     const open = !!gpuTypeExpanded[type];
 
@@ -1106,7 +1248,7 @@ function buildJobSubTable(jobs, isPending) {
   const rows = jobs.map(j => {
     const gresCell = j.gres ? `<span class="muted">${j.gres}</span>` : '<span class="muted">—</span>';
     return `<tr>
-      <td><a href="/job/${j.id}" style="color:var(--accent);border-bottom:1px dotted var(--accent)">${j.id}</a></td>
+      <td><a class="uj-id" href="/job/${j.id}">${j.id}</a></td>
       <td>${j.user}</td>
       <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${j.name}">${j.name}</td>
       <td>${j.cpus}</td>
@@ -1304,114 +1446,134 @@ function renderPartitions() {
   updatePartHeaders();
 }
 
-// ── user jobs panel ─────────────────────────────────────────────────────────
-let ujSortKey = 'state', ujSortDir = 1;
+// ── shared helpers for job tables ───────────────────────────────────────────
+const STATE_ABBR = {
+  RUNNING:'R', COMPLETING:'CG', PENDING:'PD', COMPLETED:'CD',
+  FAILED:'F', CANCELLED:'CA', TIMEOUT:'TO', NODE_FAIL:'NF', PREEMPTED:'PR',
+};
 
-function renderUserJobs() {
+function jobStateCell(state, done) {
+  if (done) return `<span style="color:var(--muted);font-weight:700;font-size:11px">${STATE_ABBR[state]||state.slice(0,2)}</span>`;
+  const abbr  = STATE_ABBR[state] || state.slice(0,2);
+  const color = (state==='RUNNING'||state==='COMPLETING') ? 'var(--good)'
+              : state==='PENDING' ? 'var(--warn)' : 'var(--muted)';
+  return `<span style="color:${color};font-weight:700;font-size:11px">${abbr}</span>`;
+}
+
+function fmtDate(s) {
+  if (!s || s === 'N/A' || s === 'Unknown') return '—';
+  const d = new Date(s.replace('T', ' '));
+  if (isNaN(d)) return s.slice(0, 10);
+  return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} `
+       + `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+// ── shared sort/render for job tables ───────────────────────────────────────
+function sortJobs(jobs, key, dir) {
+  const numId = j => parseInt(j.id) || 0;
+  return [...jobs].sort((a, b) => {
+    let cmp = 0;
+    if      (key === 'id')        cmp = numId(a) - numId(b);
+    else if (key === 'time')      cmp = (a.time||'').localeCompare(b.time||'');
+    else if (key === 'partition') cmp = (a.partition||'').localeCompare(b.partition||'');
+    else if (key === 'submit')    cmp = (a.submit||'').localeCompare(b.submit||'');
+    else if (key === 'state')     cmp = (a.state||'').localeCompare(b.state||'');
+    return dir * cmp;
+  });
+}
+
+function makeTh(key, label, curKey, curDir) {
+  const arrow = curKey === key ? (curDir > 0 ? ' ↑' : ' ↓') : '';
+  return `<th data-k="${key}" style="cursor:pointer;user-select:none">${label}${arrow}</th>`;
+}
+
+function jobRow(j, showOpacity) {
+  const opacity = showOpacity ? 'opacity:.55' : '';
+  return `<tr style="${opacity}">
+    <td><a class="uj-id" href="/job/${j.id}" title="${j.name}">${j.id}</a></td>
+    <td>${jobStateCell(j.state, j.done||false)}</td>
+    <td class="muted" style="max-width:80px;overflow:hidden;text-overflow:ellipsis" title="${j.partition||''}">${j.partition||'—'}</td>
+    <td class="muted">${j.time}</td>
+    <td class="muted">${fmtDate(j.submit)}</td>
+  </tr>`;
+}
+
+function wireTableSort(tableId, getSortKey, setSortState, rerender) {
+  document.querySelectorAll(`#${tableId} th[data-k]`).forEach(th =>
+    th.addEventListener('click', () => {
+      const key = th.dataset.k;
+      setSortState(key);
+      rerender();
+    }));
+}
+
+// ── active queue panel ───────────────────────────────────────────────────────
+let aqSortKey = 'state', aqSortDir = 1;
+
+function renderActiveQueue() {
   const user = SNAPSHOT.current_user || '';
   const userEl = document.getElementById('my-jobs-user');
   if (userEl) userEl.textContent = user ? `(${user})` : '';
 
-  // History maintained server-side in ~/.slurmboard_jobs.json
-  const allJobs = SNAPSHOT.user_jobs || [];
-  const panel = document.getElementById('user-jobs-panel');
-  if (!allJobs.length) {
-    panel.innerHTML = '<p class="muted" style="font-size:13px;margin:4px 0">No jobs found.</p>';
+  const jobs = sortJobs(SNAPSHOT.active_queue || [], aqSortKey, aqSortDir);
+  const panel = document.getElementById('aq-panel');
+  if (!jobs.length) {
+    panel.innerHTML = '<p class="muted" style="font-size:13px;margin:4px 0">No active jobs.</p>';
     return;
   }
-
-  // Sort
-  const stateRank = j => j.done ? 3
-    : j.state === 'RUNNING' || j.state === 'COMPLETING' ? 0
-    : j.state === 'PENDING' ? 1 : 2;
-  const numId = j => parseInt(j.id) || 0;
-  allJobs.sort((a, b) => {
-    let cmp = 0;
-    if      (ujSortKey === 'state')     cmp = stateRank(a) - stateRank(b) || numId(b) - numId(a);
-    else if (ujSortKey === 'id')        cmp = numId(a) - numId(b);
-    else if (ujSortKey === 'time')      cmp = a.time.localeCompare(b.time);
-    else if (ujSortKey === 'partition') cmp = (a.partition||'').localeCompare(b.partition||'');
-    else if (ujSortKey === 'submit')    cmp = (a.submit||'').localeCompare(b.submit||'');
-    return ujSortDir * cmp;
-  });
-
-  const nRun  = allJobs.filter(j => !j.done && (j.state==='RUNNING'||j.state==='COMPLETING')).length;
-  const nPend = allJobs.filter(j => !j.done && j.state==='PENDING').length;
-  const nDone = allJobs.filter(j => j.done).length;
-
-  // Slurm state → abbreviation + color (mirrors squeue output codes)
-  const STATE_ABBR = {
-    RUNNING:'R', COMPLETING:'CG', PENDING:'PD', COMPLETED:'CD',
-    FAILED:'F', CANCELLED:'CA', TIMEOUT:'TO', NODE_FAIL:'NF', PREEMPTED:'PR',
-  };
-  function stateCell(j) {
-    if (j.done) return `<span style="color:var(--accent);font-weight:700;font-size:11px">DONE</span>`;
-    const abbr  = STATE_ABBR[j.state] || j.state.slice(0,2);
-    const color = (j.state==='RUNNING'||j.state==='COMPLETING') ? 'var(--good)'
-                : j.state==='PENDING' ? 'var(--warn)' : 'var(--muted)';
-    return `<span style="color:${color};font-weight:700;font-size:11px">${abbr}</span>`;
-  }
-
-  function ujTh(key, label) {
-    const arrow = ujSortKey === key ? (ujSortDir > 0 ? ' ↑' : ' ↓') : '';
-    return `<th data-k="${key}" data-label="${label}" style="cursor:pointer;user-select:none">${label}${arrow}</th>`;
-  }
-
-  function fmtDate(s) {
-    if (!s || s === 'N/A' || s === 'Unknown') return '—';
-    const d = new Date(s.replace('T', ' '));
-    if (isNaN(d)) return s.slice(0, 10);
-    return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} `
-         + `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-  }
-
-  const rows = allJobs.map(j => {
-    const part = j.partition || '—';
-    return `<tr style="${j.done?'opacity:.4':''}">
-      <td><a class="uj-id" href="/job/${j.id}" title="${j.name}">${j.id}</a></td>
-      <td>${stateCell(j)}</td>
-      <td class="muted" style="max-width:100px;overflow:hidden;text-overflow:ellipsis" title="${part}">${part}</td>
-      <td class="muted">${j.time}</td>
-      <td class="muted">${fmtDate(j.submit)}</td>
-    </tr>`;
-  }).join('');
-
-  panel.innerHTML = `
-    <div style="font-size:12px;color:var(--muted);margin-bottom:6px">
-      <span style="color:var(--good)">${nRun}</span> R &nbsp;·&nbsp;
-      <span style="color:var(--warn)">${nPend}</span> PD
-      ${nDone ? `&nbsp;·&nbsp; ${nDone} done` : ''}
-    </div>
-    <table id="uj-table">
-      <thead><tr>
-        ${ujTh('id','ID')}
-        ${ujTh('state','St')}
-        ${ujTh('partition','Partition')}
-        ${ujTh('time','Time')}
-        ${ujTh('submit','Date')}
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-
-  document.querySelectorAll('#uj-table th[data-k]').forEach(th =>
-    th.addEventListener('click', () => {
-      const key = th.dataset.k;
-      if (ujSortKey === key) ujSortDir *= -1;
-      else { ujSortKey = key; ujSortDir = 1; }
-      renderUserJobs();
-    }));
+  const th = (k, l) => makeTh(k, l, aqSortKey, aqSortDir);
+  panel.innerHTML = `<table id="aq-table">
+    <thead><tr>
+      ${th('id','ID')}${th('state','St')}${th('partition','Partition')}${th('time','Time')}${th('submit','Date')}
+    </tr></thead>
+    <tbody>${jobs.map(j => jobRow(j, false)).join('')}</tbody>
+  </table>`;
+  wireTableSort('aq-table', () => aqSortKey, (key) => {
+    if (aqSortKey === key) aqSortDir *= -1; else { aqSortKey = key; aqSortDir = 1; }
+  }, renderActiveQueue);
 }
 
+// ── history jobs panel ───────────────────────────────────────────────────────
+let histSortKey = 'submit', histSortDir = -1;
+
+function renderHistoryJobs() {
+  // exclude jobs still active — those are shown in Active Queue
+  const allJobs = sortJobs(
+    (SNAPSHOT.user_jobs || []).filter(j => j.done),
+    histSortKey, histSortDir
+  );
+  const panel = document.getElementById('hist-panel');
+  if (!allJobs.length) {
+    panel.innerHTML = '<p class="muted" style="font-size:13px;margin:4px 0">No history found.</p>';
+    return;
+  }
+  const th = (k, l) => makeTh(k, l, histSortKey, histSortDir);
+  panel.innerHTML = `<table id="hist-table">
+    <thead><tr>
+      ${th('id','ID')}${th('state','St')}${th('partition','Partition')}${th('time','Time')}${th('submit','Date')}
+    </tr></thead>
+    <tbody>${allJobs.map(j => jobRow(j, false)).join('')}</tbody>
+  </table>`;
+  wireTableSort('hist-table', () => histSortKey, (key) => {
+    if (histSortKey === key) histSortDir *= -1; else { histSortKey = key; histSortDir = 1; }
+  }, renderHistoryJobs);
+}
+
+// DELETE ME PLACEHOLDER — original renderHistoryJobs tail follows
 // ── draggable column resizers ───────────────────────────────────────────────
 function initColumnResizers() {
   const leftCol  = document.querySelector('.left-col');
   const rightCol = document.querySelector('.right-col');
 
-  // Restore saved widths (CSS width:25% is the default when no saved value)
+  const aqSection   = document.getElementById('aq-panel').closest('.jobs-section');
+  const histSection = document.getElementById('hist-panel').closest('.jobs-section');
+
+  // Restore saved sizes
   try {
     const saved = JSON.parse(localStorage.getItem('sb_col_w') || 'null');
     if (saved && saved.left)  leftCol.style.width  = saved.left  + 'px';
     if (saved && saved.right) rightCol.style.width = saved.right + 'px';
+    if (saved && saved.aqH)   aqSection.style.flex = `0 0 ${saved.aqH}px`;
   } catch(e) {}
 
   function saveWidths() {
@@ -1419,12 +1581,12 @@ function initColumnResizers() {
       localStorage.setItem('sb_col_w', JSON.stringify({
         left:  leftCol.offsetWidth,
         right: rightCol.offsetWidth,
+        aqH:   aqSection.offsetHeight,
       }));
     } catch(e) {}
   }
 
   function wire(id, col, sign) {
-    // sign=+1: drag right → col grows; sign=-1: drag right → col shrinks
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('mousedown', e => {
@@ -1446,20 +1608,46 @@ function initColumnResizers() {
     });
   }
 
-  wire('resizer-left',  leftCol,  +1);  // left resizer → left col grows/shrinks
-  wire('resizer-right', rightCol, -1);  // right resizer → right col shrinks/grows
+  function wireV(id, topSection) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const startY = e.clientY, startH = topSection.offsetHeight;
+      el.classList.add('dragging');
+      const onMove = e => {
+        topSection.style.flex = `0 0 ${Math.max(60, startH + (e.clientY - startY))}px`;
+      };
+      const onUp = () => {
+        el.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        saveWidths();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+
+  wire('resizer-left',  leftCol,  +1);
+  wire('resizer-right', rightCol, -1);
+  wireV('resizer-jobs', aqSection);
 }
 
 // ── init ───────────────────────────────────────────────────────────────────
 renderSummary(SNAPSHOT.summary);
 renderGpuTable(SNAPSHOT.summary.gpu_by_type);
+wireGpuHeaders();
 wirePartHeaders();
 document.getElementById('vram-min').addEventListener('input',  renderPartitions);
 document.getElementById('idle-only').addEventListener('change', renderPartitions);
 initColumnResizers();
-document.getElementById('uj-refresh-btn').addEventListener('click', () => refreshUserJobs());
+document.getElementById('aq-refresh-btn').addEventListener('click', () => refreshActiveQueue());
+document.getElementById('hist-refresh-btn').addEventListener('click', () => refreshHistoryJobs());
 renderPartitions();
-renderUserJobs();
+renderActiveQueue();
+renderHistoryJobs();
+refreshHistoryJobs();
 </script>
 </body>
 </html>
@@ -1522,6 +1710,21 @@ class Handler(BaseHTTPRequestHandler):
                 status = 200
             except Exception as exc:
                 log.error("build_cluster_snapshot failed: %s", exc, exc_info=True)
+                body   = json.dumps({"error": str(exc)}).encode("utf-8")
+                status = 500
+            self.send_response(status)
+            self.send_header("Content-Type",   "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control",  "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/data/activequeue":
+            try:
+                jobs   = collect_active_queue(getpass.getuser())
+                body   = json.dumps({"active_queue": jobs}).encode("utf-8")
+                status = 200
+            except Exception as exc:
+                log.error("collect_active_queue failed: %s", exc, exc_info=True)
                 body   = json.dumps({"error": str(exc)}).encode("utf-8")
                 status = 500
             self.send_response(status)
