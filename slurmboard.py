@@ -1,4 +1,5 @@
-#!/usr/bin/python3.11
+#!/bin/sh
+''''exec $(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3.10 || command -v python3.9 || command -v python3.8 || command -v python3.7 || echo python3) -- "$0" "$@" # '''
 """
 slurmboard - a tiny, dependency-free web dashboard for a Slurm cluster.
 
@@ -11,6 +12,10 @@ polling, no caching, no third-party packages - stdlib only.
 Usage:
     python3 slurmboard.py [--port 8000] [--host 0.0.0.0]
 """
+
+import sys
+if sys.version_info < (3, 7):
+    sys.exit(f"slurmboard requires Python 3.7+, got {sys.version}")
 
 import argparse
 import html as _html
