@@ -63,3 +63,7 @@ Job history is persisted to `jobs_history.json` (same directory as the script, g
 ## Inspiration
 
 Motivated by [slurmmanager](https://github.com/paulgavrikov/slurmmanager); built to run without SSH access to compute nodes.
+
+## License
+
+MIT © 2026 zhangd — see [LICENSE](LICENSE).
