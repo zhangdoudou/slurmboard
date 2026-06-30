@@ -21,6 +21,22 @@ Deploy directly on the Slurm login node — no SSH tunneling, no extra packages,
 - **My Jobs panel** — persistent job history (`jobs_history.json`), marks finished jobs as DONE; sortable by state / ID / time / date; shows submit time
 - **All progress bars show idle ratio** — green bar = available resources
 
+## Installation
+
+```bash
+git clone https://github.com/zhangdoudou/slurmboard.git
+cd slurmboard
+chmod +x slurmboard.py
+```
+
+Optionally add it to your `PATH` for convenience:
+
+```bash
+ln -s "$PWD/slurmboard.py" ~/.local/bin/slurmboard
+```
+
+No `pip install` needed — pure Python stdlib.
+
 ## Requirements
 
 - Python ≥ 3.7 (stdlib only — no pip installs)
