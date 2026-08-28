@@ -44,11 +44,14 @@ final class SFTPBrowser: ObservableObject {
     @Published var path = "."
     @Published var loading = false
     @Published var message = "Select a host"
+    @Published var connectionError: String?
     var host: SSHHost?
     private let controlPath = "/tmp/slurmboard-sftp-\(UUID().uuidString.prefix(8).lowercased()).sock"
 
     func connect(_ host: SSHHost, initialPath: String? = nil) {
         self.host = host
+        items = []
+        connectionError = nil
         path = initialPath?.isEmpty == false ? initialPath! : "."
         refresh()
     }
@@ -57,7 +60,7 @@ final class SFTPBrowser: ObservableObject {
     func up() { guard path != "." else { return }; path = (path as NSString).deletingLastPathComponent; if path.isEmpty { path = "." }; refresh() }
     func refresh() {
         guard let host else { return }
-        loading = true; message = "Loading…"
+        loading = true; message = "Loading…"; connectionError = nil
         let currentPath = path
         Task.detached {
             let result = Self.batch(host: host, controlPath: self.controlPath,
@@ -66,8 +69,19 @@ final class SFTPBrowser: ObservableObject {
             let absolute = Self.parseWorkingDirectory(result.output)
             await MainActor.run {
                 if currentPath == ".", let absolute { self.path = absolute }
-                self.items = parsed; self.loading = false
-                self.message = result.status == 0 ? "" : result.output
+                self.loading = false
+                if result.status == 0 {
+                    self.items = parsed
+                    self.message = ""
+                    self.connectionError = nil
+                } else {
+                    self.items = []
+                    let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.message = detail
+                    self.connectionError = detail.isEmpty
+                        ? "SFTP connection failed (exit \(result.status))."
+                        : detail
+                }
             }
         }
     }
@@ -112,7 +126,9 @@ final class SFTPBrowser: ObservableObject {
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/sftp")
         var args = host.connectionArguments
         if let i = args.firstIndex(of: "-p") { args[i] = "-P" }
-        proc.arguments = ["-q", "-b", "-", "-o", "ControlMaster=auto", "-o", "ControlPersist=120", "-o", "ControlPath=\(controlPath)"] + args
+        proc.arguments = ["-b", "-", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                          "-o", "ControlMaster=auto", "-o", "ControlPersist=120",
+                          "-o", "ControlPath=\(controlPath)"] + args
         proc.standardInput = input; proc.standardOutput = output; proc.standardError = output
         do { try proc.run() } catch { return (-1, error.localizedDescription) }
         input.fileHandleForWriting.write((commands.joined(separator: "\n") + "\n").data(using: .utf8)!)
@@ -578,18 +594,52 @@ struct SFTPView: View {
                     .help("Use this directory when opening this host")
                 Button { refresh(side) } label: { Image(systemName: "arrow.clockwise") }
             }.padding(10)
-            Table(items.sorted(using: sortOrder.wrappedValue), selection: selection, sortOrder: sortOrder) {
-                TableColumn("Name", value: \FileItem.name) { item in
-                    HStack { Image(systemName: item.isDirectory ? "folder.fill" : "doc").foregroundStyle(item.isDirectory ? .blue : .secondary); Text(item.name) }
-                        .contentShape(Rectangle()).onTapGesture(count: 2) { open(item) }
+            ZStack {
+                Table(items.sorted(using: sortOrder.wrappedValue), selection: selection, sortOrder: sortOrder) {
+                    TableColumn("Name", value: \FileItem.name) { item in
+                        HStack { Image(systemName: item.isDirectory ? "folder.fill" : "doc").foregroundStyle(item.isDirectory ? .blue : .secondary); Text(item.name) }
+                            .contentShape(Rectangle()).onTapGesture(count: 2) { open(item) }
+                    }
+                    TableColumn("Date Modified", value: \.modified)
+                    TableColumn("Size", value: \FileItem.numericSize) { Text($0.size) }.width(80)
+                    TableColumn("Kind", value: \FileItem.kind).width(80)
                 }
-                TableColumn("Date Modified", value: \.modified)
-                TableColumn("Size", value: \FileItem.numericSize) { Text($0.size) }.width(80)
-                TableColumn("Kind", value: \FileItem.kind).width(80)
-            }
-            .contextMenu(forSelectionType: FileItem.ID.self) { ids in
-                if let id = ids.first, let item = items.first(where: { $0.id == id }) {
-                    itemMenu(item, side: side)
+                .contextMenu(forSelectionType: FileItem.ID.self) { ids in
+                    if let id = ids.first, let item = items.first(where: { $0.id == id }) {
+                        itemMenu(item, side: side)
+                    }
+                }
+
+                if let browser = browser(for: side), browser.loading, items.isEmpty {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Connecting to \(browser.host?.alias ?? "host")…")
+                            .font(.headline)
+                    }
+                    .padding(24)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                } else if let browser = browser(for: side),
+                          let error = browser.connectionError {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.red)
+                        Text("Unable to connect to \(browser.host?.alias ?? "host")")
+                            .font(.headline)
+                        ScrollView {
+                            Text(error)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxWidth: 520, maxHeight: 140)
+                        Button("Retry") { browser.refresh() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 600)
                 }
             }
         }
