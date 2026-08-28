@@ -18,12 +18,12 @@ struct TerminalDescriptor: Identifiable, Hashable {
 }
 
 /// App-wide registry of live cluster services. Each SwiftUI cluster window is
-/// opened with a service `UUID` and looks the live `SlurmService` up here, so
+/// opened with a service `UUID` and looks the live `DashboardService` up here, so
 /// the connection survives independently of any particular view.
 @MainActor
 final class ConnectionManager: ObservableObject {
 
-    @Published private(set) var services: [UUID: SlurmService] = [:]
+    @Published private(set) var services: [UUID: DashboardService] = [:]
     @Published private(set) var connectionIDs: [UUID] = []
     @Published private(set) var hosts: [SSHHost] = []
     @Published private(set) var terminals: [UUID: TerminalDescriptor] = [:]
@@ -62,6 +62,39 @@ final class ConnectionManager: ObservableObject {
         saveHosts()
     }
 
+    func addHost(_ host: SSHHost, password: String?) {
+        addHost(host)
+        if let password, !password.isEmpty {
+            CredentialStore.setPassword(password, for: host.id)
+        }
+    }
+
+    func updateHost(_ host: SSHHost, replacing originalID: String,
+                    password: String?, clearPassword: Bool) {
+        let previousPassword = CredentialStore.password(for: originalID)
+        guard let index = hosts.firstIndex(where: { $0.id == originalID }) else {
+            addHost(host, password: password)
+            return
+        }
+        if let duplicate = hosts.firstIndex(where: { $0.id == host.id && $0.id != originalID }) {
+            hosts.remove(at: duplicate)
+        }
+        if let updatedIndex = hosts.firstIndex(where: { $0.id == originalID }) {
+            hosts[updatedIndex] = host
+        } else if index <= hosts.endIndex {
+            hosts.insert(host, at: min(index, hosts.endIndex))
+        }
+        if originalID != host.id { CredentialStore.deletePassword(for: originalID) }
+        if clearPassword {
+            CredentialStore.deletePassword(for: host.id)
+        } else if let password, !password.isEmpty {
+            CredentialStore.setPassword(password, for: host.id)
+        } else if let previousPassword, originalID != host.id {
+            CredentialStore.setPassword(previousPassword, for: host.id)
+        }
+        saveHosts()
+    }
+
     func importHosts(_ imported: [SSHHost]) {
         for host in imported where !hosts.contains(where: { $0.alias == host.alias }) {
             hosts.append(host)
@@ -71,6 +104,7 @@ final class ConnectionManager: ObservableObject {
 
     func removeHosts(at offsets: IndexSet) {
         for index in offsets.sorted(by: >) where hosts.indices.contains(index) {
+            CredentialStore.deletePassword(for: hosts[index].id)
             hosts.remove(at: index)
         }
         saveHosts()
@@ -83,7 +117,7 @@ final class ConnectionManager: ObservableObject {
             selectedTab = .cluster(existing)
             return existing
         }
-        let svc = SlurmService(host: host)
+        let svc = DashboardService(host: host, password: CredentialStore.password(for: host.id))
         services[svc.id] = svc
         connectionIDs.append(svc.id)
         selectedTab = .cluster(svc.id)
@@ -91,7 +125,7 @@ final class ConnectionManager: ObservableObject {
         return svc.id
     }
 
-    func service(for id: UUID) -> SlurmService? { services[id] }
+    func service(for id: UUID) -> DashboardService? { services[id] }
 
     func openTerminal(host: SSHHost) {
         if let id = terminalIDs.first(where: { terminals[$0]?.host.id == host.id }) {
