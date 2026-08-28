@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 *.log
 jobs_history.json
+issues/
+.claude/
+
 # macOS app (SwiftPM) build artifacts
 SlurmboardApp/.build/
 SlurmboardApp/Slurmboard.app/
