@@ -76,6 +76,19 @@ Job history is persisted to `jobs_history.json` (same directory as the script, g
 4. Click a partition row to expand its nodes and pick the least loaded one.
 5. Monitor your submitted jobs in the **My Jobs** panel on the right.
 
+## Native macOS app
+
+Prefer not to run a server on the login node and juggle browser tabs?
+[`SlurmboardApp/`](SlurmboardApp/) is a fully native macOS client (SwiftUI). It
+reads your `~/.ssh/config`, runs the Slurm commands (`scontrol` / `sinfo` /
+`squeue` / `sacct`) directly on the login node over a multiplexed SSH connection
+(`ControlMaster`), parses them locally, and renders the same three-column
+dashboard in a single tabbed workspace, including clusters reached through a
+jump host (`ProxyJump`).
+
+No web server, no port forwarding, and **nothing to install on the cluster**
+(not even Python). See [SlurmboardApp/README.md](SlurmboardApp/README.md).
+
 ## Inspiration
 
 Motivated by [slurmmanager](https://github.com/paulgavrikov/slurmmanager); built to run without SSH access to compute nodes.
