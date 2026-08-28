@@ -4,8 +4,6 @@ __pycache__/
 jobs_history.json
 issues/
 .claude/
-
-# macOS app (SwiftPM) build artifacts
+.DS_Store
 SlurmboardApp/.build/
 SlurmboardApp/Slurmboard.app/
-.DS_Store
