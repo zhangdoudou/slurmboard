@@ -38,6 +38,25 @@ ln -s "$PWD/slurmboard.py" ~/.local/bin/slurmboard
 
 No `pip install` needed — pure Python stdlib.
 
+## macOS app
+
+The `feature/macos-native-app` branch also contains a native macOS shell with
+host cards, terminal and SFTP tabs, and the Slurmboard dashboard embedded in a
+`WKWebView` over an automatically managed SSH tunnel.
+
+Build it locally with Xcode Command Line Tools or Xcode:
+
+```bash
+git clone -b feature/macos-native-app \
+  https://github.com/zhangdoudou/slurmboard.git
+cd slurmboard/SlurmboardApp
+./build_app.sh --release
+open Slurmboard.app
+```
+
+See [`SlurmboardApp/README.md`](SlurmboardApp/README.md) for architecture,
+requirements, host authentication, security, and troubleshooting details.
+
 ## Requirements
 
 - Python ≥ 3.7 (stdlib only — no pip installs)
