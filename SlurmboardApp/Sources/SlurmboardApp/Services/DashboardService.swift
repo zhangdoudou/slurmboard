@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import Darwin
 
 /// Owns one SSH process that streams slurmboard.py to the login node and
 /// forwards its loopback HTTP port back to the native app.
@@ -40,6 +41,12 @@ final class DashboardService: ObservableObject {
     }
 
     private func startTunnel() async {
+        var diagnosticURL: URL?
+        var diagnosticHandle: FileHandle?
+        defer {
+            try? diagnosticHandle?.close()
+            if let diagnosticURL { try? FileManager.default.removeItem(at: diagnosticURL) }
+        }
         do {
             let source = try Self.dashboardSource()
             let localPort = Int.random(in: 49152...65535)
@@ -62,17 +69,28 @@ final class DashboardService: ObservableObject {
             if let password { process.environment = try prepareAskPass(password: password) }
 
             let input = Pipe()
-            let errors = Pipe()
+            let errorURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("slurmboard-ssh-\(UUID().uuidString).log")
+            guard FileManager.default.createFile(atPath: errorURL.path, contents: nil) else {
+                throw DashboardError(message: "Could not create a temporary SSH diagnostic log.")
+            }
+            let errorHandle = try FileHandle(forWritingTo: errorURL)
+            diagnosticURL = errorURL
+            diagnosticHandle = errorHandle
             process.standardInput = input
             process.standardOutput = FileHandle.nullDevice
-            process.standardError = errors
+            process.standardError = errorHandle
             try process.run()
             self.process = process
-            try input.fileHandleForWriting.write(contentsOf: source)
-            try input.fileHandleForWriting.close()
+            let inputWriter = input.fileHandleForWriting
+            // If an unreachable host makes SSH close stdin early, turn EPIPE
+            // into a normal write error rather than a process-killing SIGPIPE.
+            _ = Darwin.fcntl(inputWriter.fileDescriptor, F_SETNOSIGPIPE, 1)
+            try inputWriter.write(contentsOf: source)
+            try inputWriter.close()
 
             let url = URL(string: "http://127.0.0.1:\(localPort)/")!
-            try await waitUntilReady(url: url, process: process, errors: errors)
+            try await waitUntilReady(url: url, process: process, diagnosticURL: errorURL)
             guard !Task.isCancelled, process.isRunning else { cleanupAuth(); return }
             cleanupAuth()
             dashboardURL = url
@@ -91,9 +109,14 @@ final class DashboardService: ObservableObject {
             cleanupAuth()
             return
         } catch {
+            dashboardURL = nil
+            if let process, process.isRunning { process.terminate() }
+            process = nil
+            try? diagnosticHandle?.synchronize()
+            let message = Self.connectionErrorMessage(fallback: error, diagnosticURL: diagnosticURL)
             cleanupAuth()
             if !Task.isCancelled {
-                state = .failed(error.localizedDescription)
+                state = .failed(message)
             }
         }
     }
@@ -124,15 +147,13 @@ final class DashboardService: ObservableObject {
         self.authDirectory = nil
     }
 
-    private func waitUntilReady(url: URL, process: Process, errors: Pipe) async throws {
+    private func waitUntilReady(url: URL, process: Process, diagnosticURL: URL) async throws {
         let healthURL = url.appendingPathComponent("health")
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             try Task.checkCancellation()
             if !process.isRunning {
-                let data = errors.fileHandleForReading.readDataToEndOfFile()
-                let message = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let message = Self.readDiagnostic(at: diagnosticURL)
                 throw DashboardError(message: message?.isEmpty == false
                                      ? message! : "SSH exited before the dashboard became ready.")
             }
@@ -146,6 +167,19 @@ final class DashboardService: ObservableObject {
         }
         process.terminate()
         throw DashboardError(message: "The remote dashboard did not become ready within 30 seconds.")
+    }
+
+    private static func readDiagnostic(at url: URL) -> String? {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        return String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func connectionErrorMessage(fallback: Error, diagnosticURL: URL?) -> String {
+        if let diagnosticURL, let message = readDiagnostic(at: diagnosticURL), !message.isEmpty {
+            return message
+        }
+        return fallback.localizedDescription
     }
 
     private static func dashboardSource() throws -> Data {

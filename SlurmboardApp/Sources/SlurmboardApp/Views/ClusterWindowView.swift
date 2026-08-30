@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AppKit
 
 struct ClusterWindowView: View {
     @EnvironmentObject private var manager: ConnectionManager
@@ -46,7 +47,7 @@ private struct DashboardWorkspace: View {
     }
 
     private func statusView(title: String, detail: String?, error: Bool) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
             if error {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.largeTitle).foregroundStyle(.red)
@@ -54,12 +55,40 @@ private struct DashboardWorkspace: View {
                 ProgressView()
             }
             Text(title).font(.headline)
+            if error {
+                Text("Host: \(service.host.alias)")
+                    .font(.subheadline.weight(.medium))
+            }
             if let detail {
-                Text(detail).font(.callout).foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center).textSelection(.enabled)
+                if error {
+                    ScrollView {
+                        Text(detail)
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(maxWidth: 680, maxHeight: 180)
+                    .padding(12)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    Text("Check the SSH host or alias, network/VPN, credentials, and ~/.ssh/config, then retry.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Text(detail).font(.callout).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center).textSelection(.enabled)
+                }
             }
             if error || service.state == .disconnected {
-                Button("Retry") { service.retry() }.buttonStyle(.borderedProminent)
+                HStack {
+                    Button("Retry") { service.retry() }.buttonStyle(.borderedProminent)
+                    if error, let detail {
+                        Button("Copy Error") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(detail, forType: .string)
+                        }
+                    }
+                }
             }
         }
         .padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)
