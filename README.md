@@ -185,11 +185,11 @@ Job history is read from Slurm accounting (`sacct`) for the last seven days.
 4. Click a partition row to expand its nodes and pick the least loaded one.
 5. Monitor your submitted jobs in the **My Jobs** panel on the right.
 
-## Inspiration
-
-Motivated by [slurmmanager](https://github.com/paulgavrikov/slurmmanager); built to run without SSH access to compute nodes.
-
 ## Acknowledgements
+
+Slurmboard was motivated by
+[slurmmanager](https://github.com/paulgavrikov/slurmmanager) and was designed to
+run without SSH access to compute nodes.
 
 The native macOS app uses [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm),
 an MIT-licensed VT100/xterm terminal emulator for Swift, to provide its embedded
