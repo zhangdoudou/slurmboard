@@ -29,6 +29,8 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BIN_DIR/SlurmboardApp" "$CONTENTS/MacOS/SlurmboardApp"
 cp Info.plist "$CONTENTS/Info.plist"
 cp slurmboard.py "$CONTENTS/Resources/slurmboard.py"
+find "$BIN_DIR" -maxdepth 1 -type d -name '*.bundle' \
+    -exec cp -R {} "$CONTENTS/Resources/" \;
 
 # Ad-hoc code signature so Gatekeeper lets a locally-built app run.
 echo "==> Ad-hoc signing..."

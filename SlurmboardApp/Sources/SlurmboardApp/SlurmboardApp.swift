@@ -52,9 +52,14 @@ private struct WorkspaceView: View {
                     .accessibilityHidden(manager.selectedTab != .cluster(id))
             }
 
-            if case .terminal(let id) = manager.selectedTab,
-               let descriptor = manager.terminal(for: id) {
-                TerminalView(host: descriptor.host, session: descriptor.session)
+            ForEach(manager.terminalIDs, id: \.self) { id in
+                if let descriptor = manager.terminal(for: id) {
+                    TerminalView(host: descriptor.host, session: descriptor.session)
+                        .id(id)
+                        .opacity(manager.selectedTab == .terminal(id) ? 1 : 0)
+                        .allowsHitTesting(manager.selectedTab == .terminal(id))
+                        .accessibilityHidden(manager.selectedTab != .terminal(id))
+                }
             }
         }
         .toolbar {

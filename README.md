@@ -189,6 +189,12 @@ Job history is read from Slurm accounting (`sacct`) for the last seven days.
 
 Motivated by [slurmmanager](https://github.com/paulgavrikov/slurmmanager); built to run without SSH access to compute nodes.
 
+## Acknowledgements
+
+The native macOS app uses [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm),
+an MIT-licensed VT100/xterm terminal emulator for Swift, to provide its embedded
+PTY-backed SSH terminal.
+
 ## License
 
 MIT © 2026 zhangd — see [LICENSE](LICENSE).
