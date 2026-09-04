@@ -408,5 +408,73 @@ alice     | 1000  || 1024.00 MiB|1024.00 MiB|| 1     |unlimited
         self.assertEqual(len(result["rows"]), 1)
 
 
+class JobPriorityTests(unittest.TestCase):
+    def setUp(self):
+        SLURMBOARD._CACHE.clear()
+
+    def tearDown(self):
+        SLURMBOARD._CACHE.clear()
+
+    def test_parses_cluster_priority_configuration(self):
+        config = SLURMBOARD._parse_priority_config("""
+PriorityType              = priority/multifactor
+PriorityWeightAge         = 500
+PriorityWeightFairshare   = 1000
+PriorityWeightTRES        = (null)
+SchedulerType             = sched/backfill
+""")
+
+        self.assertEqual(config, {
+            "PriorityType": "priority/multifactor",
+            "PriorityWeightAge": "500",
+            "PriorityWeightFairshare": "1000",
+            "PriorityWeightTRES": "(null)",
+        })
+
+    def test_parses_weighted_priority_formula_and_factors(self):
+        config = {
+            "PriorityWeightAge": "500",
+            "PriorityWeightFairshare": "1000",
+            "PriorityWeightJobSize": "1000",
+            "PriorityWeightPartition": "1000",
+            "PriorityWeightQOS": "100",
+        }
+        output = "123|2800|0|200|0|600|1000|1000|0|cpu=0,mem=0|0\n"
+
+        detail = SLURMBOARD._parse_sprio_priority(output, config)
+
+        self.assertTrue(detail["available"])
+        self.assertEqual(detail["total"], 2800)
+        self.assertEqual(detail["computed_total"], 2800)
+        self.assertEqual(detail["difference"], 0)
+        by_key = {factor["key"]: factor for factor in detail["factors"]}
+        self.assertEqual(by_key["age"]["factor"], 0.4)
+        self.assertEqual(by_key["fairshare"]["factor"], 0.6)
+        self.assertEqual(by_key["job_size"]["contribution"], "1000")
+
+    def test_accepts_legacy_sprio_without_association_field(self):
+        output = "123|2800|0|200|600|1000|1000|0|0|0\n"
+
+        detail = SLURMBOARD._parse_sprio_priority(output, {}, 2800)
+
+        association = next(
+            factor for factor in detail["factors"] if factor["key"] == "association"
+        )
+        self.assertEqual(association["contribution"], "0")
+        self.assertEqual(detail["computed_total"], 2800)
+
+    def test_unavailable_live_breakdown_keeps_recorded_total(self):
+        failure = SLURMBOARD.subprocess.CalledProcessError(1, ["sprio"])
+        with mock.patch.object(
+            SLURMBOARD, "_run",
+            side_effect=["PriorityType = priority/multifactor\n", failure, failure],
+        ):
+            detail = SLURMBOARD.collect_job_priority("123", "456")
+
+        self.assertFalse(detail["available"])
+        self.assertEqual(detail["total"], 456)
+        self.assertIn("completed jobs", detail["note"])
+
+
 if __name__ == "__main__":
     unittest.main()

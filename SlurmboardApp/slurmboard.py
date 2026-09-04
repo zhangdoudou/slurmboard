@@ -1298,24 +1298,168 @@ def _parse_sacct_job_detail(text, query_jobid):
     return _add_job_gpu_detail(info)
 
 
+_PRIORITY_CONFIG_KEYS = (
+    "PriorityType", "PriorityWeightAge", "PriorityWeightAssoc",
+    "PriorityWeightFairshare", "PriorityWeightJobSize",
+    "PriorityWeightPartition", "PriorityWeightQOS", "PriorityWeightTRES",
+    "PriorityMaxAge", "PriorityDecayHalfLife", "PriorityFlags",
+    "PriorityFavorSmall",
+)
+
+_PRIORITY_FACTOR_FIELDS = (
+    ("site", "Site", None),
+    ("age", "Age", "PriorityWeightAge"),
+    ("association", "Association", "PriorityWeightAssoc"),
+    ("fairshare", "Fair-share", "PriorityWeightFairshare"),
+    ("job_size", "Job size", "PriorityWeightJobSize"),
+    ("partition", "Partition", "PriorityWeightPartition"),
+    ("qos", "QOS", "PriorityWeightQOS"),
+    ("tres", "TRES", "PriorityWeightTRES"),
+    ("nice", "Nice", None),
+)
+
+
+def _parse_priority_config(text):
+    """Extract the priority settings relevant to a job's multifactor score."""
+    wanted = set(_PRIORITY_CONFIG_KEYS)
+    config = {}
+    for line in text.splitlines():
+        match = re.match(r"^\s*([A-Za-z][A-Za-z0-9]*)\s*=\s*(.*?)\s*$", line)
+        if match and match.group(1) in wanted:
+            config[match.group(1)] = match.group(2)
+    return config
+
+
+def _priority_number(value):
+    """Parse a scalar sprio value while preserving non-scalar TRES output."""
+    value = str(value or "").strip()
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?(?:\d+(?:\.\d*)?|\.\d+)", value):
+        return float(value)
+    return None
+
+
+def _sum_priority_value(value):
+    """Return the numeric total of a scalar or named TRES contribution list."""
+    scalar = _priority_number(value)
+    if scalar is not None:
+        return scalar
+    pieces = re.findall(r"(?:^|,)[^=,]+=(-?(?:\d+(?:\.\d*)?|\.\d+))", str(value or ""))
+    return sum(float(piece) for piece in pieces) if pieces else None
+
+
+def _parse_sprio_priority(text, config, fallback_total=None):
+    """Parse delimiter-separated weighted priority components from sprio."""
+    line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    values = line.split("|")
+    if len(values) == 10:
+        values.insert(4, "0")  # Slurm versions predating the association field
+    if len(values) != 11:
+        return None
+
+    names = ("job_id", "total", "site", "age", "association", "fairshare",
+             "job_size", "partition", "qos", "tres", "nice")
+    row = dict(zip(names, (value.strip() for value in values)))
+    factors = []
+    computed = 0.0
+    computable = True
+    for key, label, weight_key in _PRIORITY_FACTOR_FIELDS:
+        contribution = row[key]
+        amount = _sum_priority_value(contribution)
+        if amount is None:
+            computable = False
+        else:
+            computed += -amount if key == "nice" else amount
+        weight = config.get(weight_key) if weight_key else None
+        normalized = None
+        numeric_weight = _priority_number(weight)
+        if key not in ("site", "nice", "tres") and amount is not None and numeric_weight:
+            normalized = amount / numeric_weight
+        factors.append({
+            "key": key, "label": label, "contribution": contribution or "0",
+            "weight": weight, "factor": normalized,
+            "operator": "subtract" if key == "nice" else "add",
+        })
+
+    total = _priority_number(row["total"])
+    if total is None:
+        total = _priority_number(fallback_total)
+    computed_value = int(round(computed)) if computable else None
+    return {
+        "available": True,
+        "job_id": row["job_id"],
+        "total": total if total is not None else row["total"],
+        "computed_total": computed_value,
+        "difference": (total - computed_value
+                       if isinstance(total, (int, float)) and computed_value is not None else None),
+        "factors": factors,
+        "config": config,
+        "formula": "Site + Age + Association + Fair-share + Job size + Partition + QOS + TRES − Nice",
+        "note": None,
+    }
+
+
+def collect_job_priority(jobid, fallback_total=None):
+    """Return a best-effort live multifactor breakdown for one Slurm job."""
+    try:
+        config = _cached(
+            "priority-config", 300,
+            lambda: _parse_priority_config(_run(["scontrol", "show", "config"])),
+        )
+    except (OSError, subprocess.SubprocessError):
+        config = {}
+
+    detail = None
+    for output_format in (
+        "%i|%Y|%S|%A|%B|%F|%J|%P|%Q|%T|%N",
+        "%i|%Y|%S|%A|%F|%J|%P|%Q|%T|%N",
+    ):
+        command = [
+            "sprio", "--jobs", jobid, "--noheader", "--format", output_format,
+        ]
+        try:
+            detail = _parse_sprio_priority(_run(command), config, fallback_total)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if detail is not None:
+            break
+    if detail is not None:
+        return detail
+    recorded_total = _priority_number(fallback_total)
+    return {
+        "available": False,
+        "total": recorded_total if recorded_total is not None else fallback_total,
+        "computed_total": None,
+        "difference": None,
+        "factors": [],
+        "config": config,
+        "formula": None,
+        "note": ("A live factor breakdown is unavailable. sprio normally reports pending "
+                 "jobs when the priority/multifactor plugin is enabled; completed jobs "
+                 "retain only their recorded total priority."),
+    }
+
+
 def collect_job_detail(jobid):
     query_jobid = normalize_job_id(jobid)
     try:
         text = _run(["scontrol", "show", "job", query_jobid])
-        return _parse_scontrol_job_detail(text)
+        info = _parse_scontrol_job_detail(text)
     except subprocess.CalledProcessError:
         log.debug("scontrol has no live record for job %s; falling back to sacct", query_jobid)
-
-    columns = (
-        "JobID,JobName,User,Account,QOS,State,Reason,Partition,Priority,"
-        "AllocNodes,AllocCPUS,NTasks,ReqCPUS,ReqTRES,Elapsed,Timelimit,"
-        "Submit,Start,End,NodeList,ExitCode,ReqMem"
-    )
-    text = _run([
-        "sacct", "-j", query_jobid, "--noheader", "--parsable2",
-        f"--format={columns}",
-    ])
-    return _parse_sacct_job_detail(text, query_jobid)
+        columns = (
+            "JobID,JobName,User,Account,QOS,State,Reason,Partition,Priority,"
+            "AllocNodes,AllocCPUS,NTasks,ReqCPUS,ReqTRES,Elapsed,Timelimit,"
+            "Submit,Start,End,NodeList,ExitCode,ReqMem"
+        )
+        text = _run([
+            "sacct", "-j", query_jobid, "--noheader", "--parsable2",
+            f"--format={columns}",
+        ])
+        info = _parse_sacct_job_detail(text, query_jobid)
+    info["priority_detail"] = collect_job_priority(query_jobid, info.get("priority"))
+    return info
 
 
 _JOB_CSS = """\
@@ -1400,6 +1544,17 @@ def render_job_page(jobid):
                 f'<table class="info">{body}</table></div>')
 
     mem = info.get("mem_cpu") or info.get("mem_node")
+    priority_detail = info.get("priority_detail") or {}
+    priority_total = priority_detail.get("total")
+    if priority_total is None:
+        priority_total = info.get("priority")
+    priority_parts = []
+    for factor in priority_detail.get("factors", []):
+        sign = "−" if factor.get("operator") == "subtract" else "+"
+        label = factor.get("label", factor.get("key", "Factor"))
+        priority_parts.append(f"{sign} {label} {factor.get('contribution', '0')}")
+    priority_equation = f"{priority_total} = " + " ".join(priority_parts).lstrip("+ ")
+    priority_rows = [row("Score", priority_equation), row("Availability", priority_detail.get("note"))]
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1424,7 +1579,6 @@ def render_job_page(jobid):
           row("Account",   info.get("account")),
           row("QOS",       info.get("qos")),
           row("Partition", info.get("partition")),
-          row("Priority",  info.get("priority")),
           row("Exit code", info.get("exit_code")))}
     {card("Resources",
           row("Nodes",       info.get("num_nodes")),
@@ -1434,6 +1588,7 @@ def render_job_page(jobid):
           row("GPUs",        gpu_str or None),
           row("Memory",      mem),
           row("TRES",        info.get("tres")))}
+    {card("Priority calculation", *priority_rows, full=True)}
     {card("Timing",
           row("Submit",     info.get("submit_time")),
           row("Start",      info.get("start_time")),
@@ -1681,7 +1836,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .job-dialog-title .timeout, .job-dialog-title .node_fail {
     background: rgba(239,91,91,.15); color: var(--bad);
   }
-  .job-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); gap: 12px; }
+  .job-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
   .job-card { background: var(--panel); border: 1px solid var(--border);
               border-radius: 10px; padding: 14px; }
   .job-card.full { grid-column: 1/-1; }
@@ -1692,6 +1847,19 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   .job-card td:first-child { width: 105px; color: var(--muted); padding-right: 12px; white-space: nowrap; }
   .job-card td:last-child { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
   .job-card code { white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  .priority-summary { display:flex; flex-wrap:wrap; align-items:baseline; gap:8px 14px; }
+  .priority-total { font-size:18px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .priority-equation { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px 8px;
+                       font-variant-numeric:tabular-nums; }
+  .priority-part { white-space:nowrap; }
+  .priority-operator { color:var(--muted); }
+  .priority-meta { display:flex; flex-wrap:wrap; gap:5px 14px; margin-top:8px;
+                   color:var(--muted); font-size:11px; }
+  .priority-note { margin-top:10px; color:var(--muted); font-size:12px; }
+  @media (max-width: 680px) {
+    .job-grid { grid-template-columns:minmax(0,1fr); }
+    .job-card.full { grid-column:auto; }
+  }
   .job-reason { color: var(--warn); background: rgba(240,169,63,.1);
                 border: 1px solid rgba(240,169,63,.3); border-radius: 6px;
                 padding: 8px 12px; margin-bottom: 14px; }
@@ -2164,6 +2332,51 @@ function jobCard(title, rows, full=false) {
   return `<section class="job-card${full ? ' full' : ''}"><div class="job-card-title">${escapeHtml(title)}</div><table><tbody>${body}</tbody></table></section>`;
 }
 
+function priorityNumber(value, digits=6) {
+  if (value == null || value === '') return '—';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return escapeHtml(value);
+  if (Number.isInteger(number)) return number.toLocaleString();
+  return number.toLocaleString(undefined, {maximumFractionDigits: digits});
+}
+
+function jobPriorityCard(priority, fallbackTotal) {
+  const detail = priority || {};
+  const total = detail.total ?? fallbackTotal;
+  if (!detail.available) {
+    return `<section class="job-card"><div class="job-card-title">Priority calculation</div>
+      <div class="priority-summary"><span class="priority-total">${priorityNumber(total)}</span>
+        <span class="priority-note" style="margin-top:0">Breakdown unavailable for this job</span></div></section>`;
+  }
+  const config = detail.config || {};
+  const configKeys = [
+    ['PriorityType','Plugin'], ['PriorityMaxAge','Max age'],
+    ['PriorityDecayHalfLife','Decay half-life'], ['PriorityFlags','Flags'],
+    ['PriorityFavorSmall','Favor small jobs']
+  ];
+  const meta = configKeys.filter(([key]) => config[key])
+    .map(([key,label]) => `<span><strong>${escapeHtml(label)}:</strong> ${escapeHtml(config[key])}</span>`)
+    .join('');
+  let equation = '';
+  if (Array.isArray(detail.factors)) {
+    const parts = detail.factors.map((factor, index) => {
+      const sign = factor.operator === 'subtract' ? '−' : '+';
+      const operator = index === 0 && sign === '+' ? '' : sign;
+      return `<span class="priority-part"><span class="priority-operator">${operator}</span>
+        ${escapeHtml(factor.label)} <strong>${priorityNumber(factor.contribution)}</strong></span>`;
+    }).join('');
+    equation = `<span class="priority-operator">=</span><div class="priority-equation">${parts}</div>`;
+  }
+  const computed = detail.computed_total == null ? ''
+    : `<span>Displayed sum: <strong>${priorityNumber(detail.computed_total)}</strong></span>`;
+  const difference = detail.difference
+    ? `<span>Slurm difference: <strong>${priorityNumber(detail.difference)}</strong></span>` : '';
+  const note = detail.note ? `<div class="priority-note">${escapeHtml(detail.note)}</div>` : '';
+  return `<section class="job-card"><div class="job-card-title">Priority calculation</div>
+    <div class="priority-summary"><span class="priority-total">${priorityNumber(total)}</span>${equation}</div>
+    <div class="priority-meta">${computed}${difference}${meta}</div>${note}</section>`;
+}
+
 function closeJobModal() {
   jobModal.classList.remove('open');
 }
@@ -2187,10 +2400,10 @@ async function openJobModal(jobID) {
     jobDialogBody.innerHTML = `
       <div class="job-dialog-name">${jobValue(info.job_name)}</div>${reason}
       <div class="job-grid">
-        ${jobCard('Identity', [['User',info.user],['Account',info.account],['QOS',info.qos],['Partition',info.partition],['Priority',info.priority],['Exit code',info.exit_code]])}
-        ${jobCard('Resources', [['Nodes',info.num_nodes],['CPUs',info.num_cpus],['Tasks',info.num_tasks],['CPUs / task',info.cpus_task],['GPUs',gpu],['Memory',info.mem_cpu || info.mem_node],['TRES',info.tres]])}
+        ${jobCard('Identity', [['User',info.user],['Account',info.account],['QOS',info.qos],['Partition',info.partition],['Exit code',info.exit_code]])}
+        ${jobCard('Resources', [['Nodes',info.num_nodes],['CPUs',info.num_cpus],['Tasks',info.num_tasks],['CPUs / task',info.cpus_task],['GPUs',gpu],['Memory',info.mem_cpu || info.mem_node],['TRES',info.tres],['Node list',info.nodelist],['Batch host',info.batch_host]])}
+        ${jobPriorityCard(info.priority_detail, info.priority)}
         ${jobCard('Timing', [['Submit',info.submit_time],['Start',info.start_time],['End',info.end_time],['Run time',info.runtime],['Time limit',info.timelimit]])}
-        ${jobCard('Nodes', [['Node list',info.nodelist],['Batch host',info.batch_host]])}
         ${jobCard('Paths', [['Work dir',info.workdir,true],['Command',info.command,true],['Stdout',info.stdout,true],['Stderr',info.stderr,true]], true)}
       </div>`;
   } catch (error) {

@@ -4,6 +4,7 @@ __pycache__/
 jobs_history.json
 issues/
 .claude/
+AGENTS.md
 .DS_Store
 SlurmboardApp/.build/
 SlurmboardApp/Slurmboard.app/
