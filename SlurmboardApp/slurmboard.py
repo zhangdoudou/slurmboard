@@ -2625,7 +2625,7 @@ function statePill(state) {
     : (s.includes('mix') || s.includes('alloc')) ? 'mixed'
     : (s.includes('down') || s.includes('drain') || s.includes('fail') || s.includes('maint')) ? 'down'
     : s.includes('up') ? 'up' : 'other';
-  return `<span class="pill ${cls}">${state}</span>`;
+  return `<span class="pill ${cls}">${escapeHtml(state)}</span>`;
 }
 function minibar(pct, cls='') {
   return `<span class="minibar ${cls}"><span style="width:${pct}%"></span></span>`;
@@ -2892,7 +2892,7 @@ function buildGpuPartSubTable(partitions) {
       const known = pv.alloc != null;
       const idlePct = known ? pct(pv.total - pv.alloc, pv.total) : null;
       return `<tr>
-        <td><b>${pname}</b></td>
+        <td><b>${escapeHtml(pname)}</b></td>
         <td>${known ? pv.alloc : '—'}</td>
         <td>${known ? pv.total - pv.alloc : '—'}</td>
         <td>${pv.total}</td>
@@ -2967,7 +2967,7 @@ function renderGpuTable(byType) {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td class="toggle-cell">${open ? '▼' : '▶'}</td>
-      <td><b class="part-name-link gpu-type-link">${type}</b></td>
+      <td><b class="part-name-link gpu-type-link">${escapeHtml(type)}</b></td>
       <td>${known ? v.alloc : '—'}</td>
       <td>${known ? v.total - v.alloc : '—'}</td>
       <td>${v.total}</td>
@@ -3019,13 +3019,13 @@ function renderNodeSubTable(container, partName) {
     const cpuIdleP = pct(n.cpu_total - n.cpu_alloc, n.cpu_total);
     const memIdleP = pct(n.mem_total_mb - n.mem_alloc_mb, n.mem_total_mb);
     const gpuCell = n.gpu_total
-      ? minibar(pct(n.gpu_idle, n.gpu_total), 'gpu') + `${n.gpu_idle} / ${n.gpu_total}`
+      ? minibar(pct(n.gpu_idle, n.gpu_total), 'gpu') + `${escapeHtml(n.gpu_idle)} / ${escapeHtml(n.gpu_total)}`
       : '<span class="muted">—</span>';
     const vram = n.gpu_vram_gb != null ? n.gpu_vram_gb + ' GB' : '—';
     return `<tr>
-      <td><b>${n.name}</b></td>
+      <td><b>${escapeHtml(n.name)}</b></td>
       <td>${statePill(n.state)}</td>
-      <td>${minibar(cpuIdleP, 'gpu')}${n.cpu_total - n.cpu_alloc} / ${n.cpu_total}</td>
+      <td>${minibar(cpuIdleP, 'gpu')}${n.cpu_total - n.cpu_alloc} / ${escapeHtml(n.cpu_total)}</td>
       <td>${n.load != null ? n.load : '—'}</td>
       <td>${minibar(memIdleP, 'gpu')}${fmtMem(n.mem_total_mb - n.mem_alloc_mb)} / ${fmtMem(n.mem_total_mb)}</td>
       <td>${gpuCell}</td>
@@ -3089,15 +3089,15 @@ function renderPartitionJobTable(container, jobs, isPending) {
   const timeHeader   = isPending ? 'Queued' : 'Running';
   const reasonHeader = isPending ? 'Reason' : 'Nodes';
   const rowHtml = j => {
-    const gresCell = j.gres ? `<span class="muted">${j.gres}</span>` : '<span class="muted">—</span>';
+    const gresCell = j.gres ? `<span class="muted">${escapeHtml(j.gres)}</span>` : '<span class="muted">—</span>';
     return `<tr>
-      <td><a class="uj-id" href="/job/${j.id}">${j.id}</a></td>
-      <td>${j.user}</td>
-      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${j.name}">${j.name}</td>
-      <td>${j.cpus}</td>
+      <td><a class="uj-id" href="/job/${escapeHtml(j.id)}">${escapeHtml(j.id)}</a></td>
+      <td>${escapeHtml(j.user)}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(j.name)}">${escapeHtml(j.name)}</td>
+      <td>${escapeHtml(j.cpus)}</td>
       <td>${gresCell}</td>
-      <td>${j.time}</td>
-      <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${j.reason}">${j.reason}</td>
+      <td>${escapeHtml(j.time)}</td>
+      <td class="muted" style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(j.reason)}">${escapeHtml(j.reason)}</td>
     </tr>`;
   };
   container.innerHTML = `<div class="inner-wrap"><table class="inner-table">
@@ -3118,11 +3118,11 @@ function buildPartCells(p) {
   const idleP    = gpuKnown ? pct(p.gpu_idle, p.gpu_total) : null;
   const gpuCell  = p.gpu_total
     ? (gpuKnown
-       ? minibar(idleP, 'gpu') + `${p.gpu_idle} / ${p.gpu_total}`
-       : `<span class="muted">— / ${p.gpu_total}</span>`)
+       ? minibar(idleP, 'gpu') + `${escapeHtml(p.gpu_idle)} / ${escapeHtml(p.gpu_total)}`
+       : `<span class="muted">— / ${escapeHtml(p.gpu_total)}</span>`)
     : '<span class="muted">—</span>';
   const vramCell = p.gpu_vram_gb != null
-    ? `<b>${p.gpu_vram_gb}</b> GB`
+    ? `<b>${escapeHtml(p.gpu_vram_gb)}</b> GB`
     : '<span class="muted">—</span>';
   const jobsCell = `<span class="job-toggle" data-kind="running"
         style="color:var(--good);cursor:pointer;border-bottom:1px dotted var(--good)">
@@ -3132,12 +3132,12 @@ function buildPartCells(p) {
         style="color:var(--warn);cursor:pointer;border-bottom:1px dotted var(--warn)">
         <span class="job-num">${p.jobs_pending ?? '—'}</span> pend</span>`;
   return `
-    <td><b class="part-name-link">${p.name}</b></td>
-    <td>${p.avail}</td>
-    <td>${p.timelimit}</td>
-    <td>${p.nodes}</td>
+    <td><b class="part-name-link">${escapeHtml(p.name)}</b></td>
+    <td>${escapeHtml(p.avail)}</td>
+    <td>${escapeHtml(p.timelimit)}</td>
+    <td>${escapeHtml(p.nodes)}</td>
     <td style="white-space:nowrap">${jobsCell}</td>
-    <td>${minibar(cpuIdleP, 'gpu')}${p.cpu_total - p.cpu_alloc} / ${p.cpu_total}</td>
+    <td>${minibar(cpuIdleP, 'gpu')}${p.cpu_total - p.cpu_alloc} / ${escapeHtml(p.cpu_total)}</td>
     <td>${vramCell}</td>
     <td>${gpuCell}</td>`;
 }
@@ -3145,7 +3145,7 @@ function buildPartCells(p) {
 function patchPartRow(partName) {
   const p = SNAPSHOT.partitions.find(p => p.name === partName);
   if (!p) return;
-  const tr = document.querySelector(`tr.part-row[data-part="${partName}"]`);
+  const tr = document.querySelector(`tr.part-row[data-part="${escapeHtml(partName)}"]`);
   if (!tr) return;
   const cur = expandState[partName];
 
@@ -3155,7 +3155,7 @@ function patchPartRow(partName) {
                        refreshingParts.has('*');
   const refreshHtml = isRefreshing
     ? '<span class="row-refresh loading" title="Refreshing…">&#x21bb;</span>'
-    : `<span class="row-refresh" data-part="${partName}" title="Refresh partition">&#x21bb;</span>`;
+    : `<span class="row-refresh" data-part="${escapeHtml(partName)}" title="Refresh partition">&#x21bb;</span>`;
   const toggleCell = tr.querySelector('.toggle-cell');
   if (toggleCell) {
     toggleCell.innerHTML = `${cur ? '▼' : '▶'} ${refreshHtml}`;
@@ -3237,7 +3237,7 @@ function renderPartitions() {
                          refreshingParts.has('*');
     const rowRefreshHtml = isRefreshing
       ? '<span class="row-refresh loading" title="Refreshing…">&#x21bb;</span>'
-      : `<span class="row-refresh" data-part="${p.name}" title="Refresh partition">&#x21bb;</span>`;
+      : `<span class="row-refresh" data-part="${escapeHtml(p.name)}" title="Refresh partition">&#x21bb;</span>`;
 
     const tr = document.createElement('tr');
     tr.className = 'part-row';
@@ -3343,10 +3343,10 @@ function makeTh(key, label, curKey, curDir) {
 function jobRow(j, showOpacity) {
   const opacity = showOpacity ? 'opacity:.55' : '';
   return `<tr style="${opacity}">
-    <td><a class="uj-id" href="/job/${j.id}" title="${j.name}">${j.id}</a></td>
+    <td><a class="uj-id" href="/job/${escapeHtml(j.id)}" title="${escapeHtml(j.name)}">${escapeHtml(j.id)}</a></td>
     <td>${jobStateCell(j.state, j.done||false)}</td>
-    <td class="muted" style="max-width:80px;overflow:hidden;text-overflow:ellipsis" title="${j.partition||''}">${j.partition||'—'}</td>
-    <td class="muted">${j.time}</td>
+    <td class="muted" style="max-width:80px;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(j.partition||'')}">${escapeHtml(j.partition||'—')}</td>
+    <td class="muted">${escapeHtml(j.time)}</td>
     <td class="muted">${fmtDate(j.submit)}</td>
   </tr>`;
 }
@@ -3663,11 +3663,11 @@ function renderGpus(){ const gpus=DATA.gpus||[],procs=DATA.gpu_processes||[]; $(
       <div class="gpu-stat"><b>${g.power_w==null?'—':g.power_w.toFixed(0)+' W'}</b><small>${g.power_limit_w==null?'power':'of '+g.power_limit_w.toFixed(0)+' W'}</small></div></div>
       <div class="sub" style="margin-top:12px">VRAM ${g.memory_used_mb==null?'—':g.memory_used_mb.toFixed(0)+' MB'} / ${g.memory_total_mb==null?'—':g.memory_total_mb.toFixed(0)+' MB'}</div>
       <div class="bar"><span class="${barClass(mp)}" style="width:${clamp(mp)}%"></span></div></article>`}).join('');
-  $('gpu-processes').innerHTML=!procs.length?'':`<table style="margin-top:14px"><thead><tr><th>GPU process</th><th>PID</th><th class="num">VRAM</th></tr></thead><tbody>${procs.map(p=>`<tr><td class="mono">${esc(p.command)}</td><td>${p.pid}</td><td class="num">${p.memory_used_mb==null?'—':p.memory_used_mb.toFixed(0)+' MB'}</td></tr>`).join('')}</tbody></table>`; }
+  $('gpu-processes').innerHTML=!procs.length?'':`<table style="margin-top:14px"><thead><tr><th>GPU process</th><th>PID</th><th class="num">VRAM</th></tr></thead><tbody>${procs.map(p=>`<tr><td class="mono">${esc(p.command)}</td><td>${escapeHtml(p.pid)}</td><td class="num">${p.memory_used_mb==null?'—':p.memory_used_mb.toFixed(0)+' MB'}</td></tr>`).join('')}</tbody></table>`; }
 function renderDisks(){ const rows=DATA.disks||[]; $('disk-count').textContent=`${rows.length} filesystems`;
   $('disks').innerHTML=!rows.length?'<div class="empty">Disk data unavailable.</div>':`<table><thead><tr><th>Mount</th><th>Filesystem</th><th class="num">Used</th></tr></thead><tbody>${rows.map(d=>`<tr><td class="mono">${esc(d.mount)}</td><td title="${esc(d.filesystem)}">${esc(d.filesystem)}</td><td class="num">${bytes(d.used)} / ${bytes(d.total)}<div class="bar"><span class="${barClass(d.used_percent)}" style="width:${clamp(d.used_percent)}%"></span></div></td></tr>`).join('')}</tbody></table>`; }
 function renderProcesses(){ const rows=DATA.processes||[]; $('process-count').textContent=`top ${rows.length}`;
-  $('processes').innerHTML=!rows.length?'<div class="empty">No process data available.</div>':`<table><thead><tr><th>PID</th><th>Command</th><th>Elapsed</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody>${rows.map(p=>`<tr><td>${p.pid}</td><td class="mono">${esc(p.command)}</td><td>${esc(p.elapsed)}</td><td class="num">${p.cpu_percent.toFixed(1)}%</td><td class="num">${p.memory_percent.toFixed(1)}%</td></tr>`).join('')}</tbody></table>`; }
+  $('processes').innerHTML=!rows.length?'<div class="empty">No process data available.</div>':`<table><thead><tr><th>PID</th><th>Command</th><th>Elapsed</th><th class="num">CPU</th><th class="num">Memory</th></tr></thead><tbody>${rows.map(p=>`<tr><td>${escapeHtml(p.pid)}</td><td class="mono">${esc(p.command)}</td><td>${esc(p.elapsed)}</td><td class="num">${p.cpu_percent.toFixed(1)}%</td><td class="num">${p.memory_percent.toFixed(1)}%</td></tr>`).join('')}</tbody></table>`; }
 function render(){ renderOverview();renderGpus();renderDisks();renderProcesses(); const errors=DATA.errors||[];
   $('errors').style.display=errors.length?'block':'none'; $('errors').textContent=errors.join(' · '); }
 async function refresh(){ const button=$('refresh');button.disabled=true;button.textContent='Refreshing…';
