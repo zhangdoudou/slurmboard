@@ -85,14 +85,17 @@ final class SFTPBrowser: ObservableObject {
             }
         }
     }
-    func download(_ item: FileItem, to local: URL) {
+    func download(_ item: FileItem, to local: URL, completion: (@MainActor (Bool) -> Void)? = nil) {
         guard let host else { return }
         message = "Downloading \(item.name)…"
         let remote = joined(path, item.name)
         Task.detached {
             let recursive = item.isDirectory ? "-r " : ""
             let r = Self.batch(host: host, controlPath: self.controlPath, commands: ["get \(recursive)\(Self.quoted(remote)) \(Self.quoted(local.appendingPathComponent(item.name).path))"])
-            await MainActor.run { self.message = r.status == 0 ? "Downloaded \(item.name)" : r.output }
+            await MainActor.run {
+                self.message = r.status == 0 ? "Downloaded \(item.name)" : r.output
+                completion?(r.status == 0)
+            }
         }
     }
     func upload(_ local: URL) {
@@ -212,9 +215,9 @@ final class SFTPTransferController: ObservableObject, Identifiable {
         let sourceDirectory = source.path, targetDirectory = target.path
 
         Task.detached { [self, target] in
-            let plan = Self.makePlan(sourceHost: sourceHost, sourceDirectory: sourceDirectory,
-                                     itemName: item.name, targetHost: targetHost,
-                                     targetDirectory: targetDirectory, status: { title, detail, progress in
+            let plan = await Self.makePlan(sourceHost: sourceHost, sourceDirectory: sourceDirectory,
+                                           itemName: item.name, targetHost: targetHost,
+                                           targetDirectory: targetDirectory, status: { title, detail, progress in
                 Task { @MainActor in
                     self.label = title
                     self.currentItem = detail
@@ -302,13 +305,13 @@ final class SFTPTransferController: ObservableObject, Identifiable {
 
     nonisolated private static func makePlan(sourceHost: SSHHost, sourceDirectory: String, itemName: String,
                                              targetHost: SSHHost, targetDirectory: String,
-                                             status: @escaping @Sendable (String, String, Double) -> Void) -> TransferPlan {
+                                             status: @escaping @Sendable (String, String, Double) -> Void) async -> TransferPlan {
         let sourceRoot = (sourceDirectory as NSString).appendingPathComponent(itemName)
         let targetRoot = (targetDirectory as NSString).appendingPathComponent(itemName)
-        status("Scanning source…", sourceRoot, 0.10)
-        let source = manifest(host: sourceHost, root: sourceRoot)
-        status("Scanning target…", targetRoot, 0.40)
-        let target = manifest(host: targetHost, root: targetRoot)
+        status("Scanning source and target…", "\(sourceRoot) → \(targetRoot)", 0.10)
+        async let sourceScan = manifest(host: sourceHost, root: sourceRoot)
+        async let targetScan = manifest(host: targetHost, root: targetRoot)
+        let (source, target) = await (sourceScan, targetScan)
         status("Comparing files…", "\(source.count) source items · \(target.count) target items", 0.70)
         var selected: [ManifestEntry] = []
         var skipped = 0
@@ -598,7 +601,7 @@ struct SFTPView: View {
                 Table(items.sorted(using: sortOrder.wrappedValue), selection: selection, sortOrder: sortOrder) {
                     TableColumn("Name", value: \FileItem.name) { item in
                         HStack { Image(systemName: item.isDirectory ? "folder.fill" : "doc").foregroundStyle(item.isDirectory ? .blue : .secondary); Text(item.name) }
-                            .contentShape(Rectangle()).onTapGesture(count: 2) { open(item) }
+                            .contentShape(Rectangle())
                     }
                     TableColumn("Date Modified", value: \.modified)
                     TableColumn("Size", value: \FileItem.numericSize) { Text($0.size) }.width(80)
@@ -607,6 +610,10 @@ struct SFTPView: View {
                 .contextMenu(forSelectionType: FileItem.ID.self) { ids in
                     if let id = ids.first, let item = items.first(where: { $0.id == id }) {
                         itemMenu(item, side: side)
+                    }
+                } primaryAction: { ids in
+                    if let id = ids.first, let item = items.first(where: { $0.id == id }) {
+                        open(item)
                     }
                 }
 
@@ -718,7 +725,13 @@ struct SFTPView: View {
     private func localUp() { localPath.deleteLastPathComponent(); localPathText = localPath.path; selectedLocal.removeAll(); loadLocal() }
     private func localGo(_ path: String) { let url = URL(fileURLWithPath: path).standardizedFileURL; var isDir: ObjCBool = false; if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue { localPath = url; localPathText = url.path; loadLocal() } }
     private func upload() { guard let id = selectedLocal.first, let item = localItems.first(where: { $0.id == id }) else { return }; remote.upload(localPath.appendingPathComponent(item.name)) }
-    private func download() { guard let id = selectedRemote.first, let item = remote.items.first(where: { $0.id == id }) else { return }; remote.download(item, to: localPath); loadLocal() }
+    private func download() {
+        guard let id = selectedRemote.first,
+              let item = remote.items.first(where: { $0.id == id }) else { return }
+        remote.download(item, to: localPath) { succeeded in
+            if succeeded { loadLocal() }
+        }
+    }
     private func copyLocal(_ item: FileItem) {
         let target = selectedHost != nil && selectedHost != unselectedSource ? remote : (leftHost != nil ? leftRemote : nil)
         target?.upload(localPath.appendingPathComponent(item.name))
@@ -734,7 +747,9 @@ struct SFTPView: View {
         if let target {
             manager.sftpTransfers.start(item: item, source: source, target: target)
         } else {
-            source.download(item, to: localPath)
+            source.download(item, to: localPath) { succeeded in
+                if succeeded { loadLocal() }
+            }
         }
     }
     private func beginPrompt(_ kind: PromptKind, side: Side, item: FileItem?, initial: String) { promptValue = initial; prompt = Prompt(side: side, kind: kind, item: item) }
